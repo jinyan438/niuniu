@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>纯文本阅读器</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app-loader"><span>正在加载...</span></div>
+
+    <div id="app-container">
+        <div id="bookshelf-view">
+            <div class="bookshelf-header">
+                <h1>我的书架</h1>
+                <div id="bookshelf-filter-container">
+                    <label for="bookshelf-filter">分类:</label>
+                    <select id="bookshelf-filter"></select>
+                </div>
+                <button id="btn-fanqie-search" class="control-button">🔍 搜书</button>
+                <button id="btn-export-book" class="control-button">📤 导出</button>
+                <label for="file-input" class="control-button">打开文件</label>
+                <label for="import-files-input" class="control-button">导入文件</label>
+                <label for="import-folder-input" class="control-button">导入文件夹</label>
+            </div>
+            <div id="bookshelf-grid"></div>
+        </div>
+
+        <!-- 番茄小说搜索下载模态框 -->
+        <div id="fanqie-search-modal" class="modal">
+            <div class="modal-content" style="max-width: 600px;">
+                <div class="modal-header">
+                    <h2>🔍 搜索小说</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div style="padding: 15px;">
+                    <form id="fanqie-search-form" style="display: flex; gap: 10px; margin-bottom: 15px;">
+                        <input type="text" id="fanqie-search-input" class="control-input" placeholder="输入书名或作者..." style="flex: 1;">
+                        <button type="submit" class="control-button">搜索</button>
+                    </form>
+                    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px; padding: 10px; background: var(--bg-color); border-radius: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 14px;">下载格式:</span>
+                        <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                            <input type="radio" name="fanqie-format" value="txt" id="fanqie-format-txt" checked>
+                            <span>TXT</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                            <input type="radio" name="fanqie-format" value="epub" id="fanqie-format-epub">
+                            <span>EPUB</span>
+                        </label>
+                        <span style="border-left: 1px solid var(--border-color); height: 20px; margin: 0 5px;"></span>
+                        <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;" title="启用后降低章节下载并发，适合接口较慢或失败较多时使用">
+                            <input type="checkbox" id="fanqie-backup-api">
+                            <span style="font-size: 14px;">低并发模式</span>
+                        </label>
+                    </div>
+                    <div id="fanqie-search-results" style="max-height: 400px; overflow-y: auto;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 番茄小说下载进度模态框 -->
+        <div id="fanqie-download-modal" class="modal">
+            <div class="modal-content" style="max-width: 400px;">
+                <div class="modal-header">
+                    <h2>📥 下载中</h2>
+                </div>
+                <div style="padding: 20px; text-align: center;">
+                    <div id="fanqie-download-book-name" style="font-weight: bold; margin-bottom: 15px;"></div>
+                    <div style="background: var(--border-color); border-radius: 10px; height: 20px; overflow: hidden; margin-bottom: 10px;">
+                        <div id="fanqie-download-progress-bar" style="background: var(--primary-color, #4a90d9); height: 100%; width: 0%; transition: width 0.3s;"></div>
+                    </div>
+                    <div id="fanqie-download-status" style="font-size: 14px; opacity: 0.8;">准备中...</div>
+                    <button id="btn-fanqie-cancel" class="control-button" style="margin-top: 15px;">取消下载</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 导出书籍选择模态框 -->
+        <div id="export-book-modal" class="modal">
+            <div class="modal-content" style="max-width: 500px;">
+                <div class="modal-header">
+                    <h2>📤 导出书籍</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div style="padding: 15px;">
+                    <p style="margin-bottom: 10px;">选择要导出的书籍：</p>
+                    <div id="export-book-list" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 4px;"></div>
+                    <div style="margin-top: 15px; display: flex; gap: 10px; justify-content: flex-end;">
+                        <button id="btn-export-selected" class="control-button" disabled>导出选中</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="reader-container" style="display: none;">
+            <header>
+                <p id="header-filename">请选择文件或从书架打开</p>
+                <div class="controls">
+                    <button id="btn-back-to-shelf" class="control-button">返回书架</button>
+                    <input type="file" id="file-input" accept=".txt,.epub" style="display:none;">
+                    <input type="file" id="import-files-input" accept=".txt,.epub" multiple style="display:none;">
+                    <input type="file" id="import-folder-input" webkitdirectory style="display:none;">
+                    <button id="btn-search" class="control-button">搜索</button>
+                    <button id="btn-settings" class="control-button">设置</button>
+                    
+                    <button id="btn-listen-mode" class="control-button">听书模式</button>
+                    
+                    <button id="btn-add-to-shelf" class="control-button" style="display: none;">添加到书架</button>
+                    <button id="btn-immersive-mode" class="control-button">沉浸模式</button>
+                    <button id="btn-catalog" class="control-button" style="display: none;">目录</button>
+                    <button id="btn-ai-menu" class="control-button" style="display: none;">AI数据库</button>
+                    <button id="btn-back-to-original" class="control-button" style="display: none;">返回原文</button>
+                </div>
+            </header>
+            <div id="search-bar" style="display: none;">
+                <input type="text" id="search-input" placeholder="输入关键词...">
+                <button id="btn-search-chapter">本章</button>
+                <button id="btn-search-all">全文</button>
+                <button id="btn-search-prev" disabled>&lt;</button>
+                <button id="btn-search-next" disabled>&gt;</button>
+                <span id="search-results-info"></span>
+                <button id="btn-close-search" title="关闭搜索">&times;</button>
+            </div>
+            <main class="content-wrapper" id="content-wrapper">
+                <div id="content-inner">
+                    <div class="page-container" id="prev-page-container"></div>
+                    <div class="page-container" id="current-page-container"><div class="page"><p>请选择一个 .txt 或 .epub 文件开始阅读。</p></div></div>
+                    <div class="page-container" id="next-page-container"></div>
+                </div>
+            </main>
+            <footer id="footer">
+                <span id="chapter-info"></span>
+                <span id="page-info">-- / -- 页</span>
+            </footer>
+        </div>
+
+        <div id="catalog-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>章节目录</h2><button class="close-button">&times;</button></div><ul id="catalog-list" class="modal-list"></ul></div></div>
+        
+        <div id="tag-edit-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>编辑标签</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div id="tag-edit-modal-body">
+                    <div id="tag-edit-modal-title"></div>
+                    <label>当前标签:</label>
+                    <div id="current-tags-list"></div>
+                    <label for="new-tag-input">添加新标签:</label>
+                    <form id="add-tag-form">
+                        <input type="text" id="new-tag-input" class="control-input" placeholder="输入后按回车或点击添加">
+                        <button type="submit" id="btn-add-tag" class="control-button">添加</button>
+                    </form>
+                </div>
+                 <div class="modal-footer">
+                    <button id="btn-close-tag-modal" class="control-button">完成</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="settings-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>阅读设置</h2><button class="close-button">&times;</button></div>
+                <div id="settings-list">
+                    <div class="setting-item"><span>点击翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-click-page"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span>滑动翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-swipe-page"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span>段落悬停高亮</span><label class="toggle-switch"><input type="checkbox" id="toggle-hover-highlight"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span>对白文字标色</span><label class="toggle-switch"><input type="checkbox" id="toggle-dialogue-highlight"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span>专注模式</span><label class="toggle-switch"><input type="checkbox" id="toggle-focus-mode"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span>自定义对白颜色</span><div style="display: flex; align-items: center; gap: 8px;"><input type="color" id="dialogue-color-picker"><button id="btn-reset-dialogue-color" class="control-button" style="padding: 2px 8px; font-size: 12px;">重置</button></div></div>
+                    
+                    <div class="setting-item">
+                        <span>导出目录</span>
+                        <div style="display: flex; align-items: center; gap: 8px; flex: 1; max-width: 60%;">
+                            <input type="text" id="export-dir-input" placeholder="小说" style="flex: 1; padding: 5px 8px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 12px;">
+                            <button id="btn-save-export-dir" class="control-button" style="padding: 5px 8px; font-size: 12px;">保存</button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>阅读主题</span>
+                        <select id="theme-selector">
+                            <option value="default">默认护眼</option>
+                            <option value="theme-dark">暗黑模式</option>
+                            <option value="theme-green">护眼绿</option>
+                            <option value="theme-blue">静谧蓝</option>
+                            <option value="theme-gray">简约灰</option>
+                            <option value="theme-eink">仿墨水屏</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>听书引擎</span>
+                        <select id="tts-provider-selector">
+                            <option value="gptsovits">GPT-SoVITS</option>
+                            <option value="indextts">IndexTTS</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>听书音色</span>
+                         <div id="tts-voice-selector-container">
+                             <select id="tts-voice-selector"></select>
+                             <span id="tts-status-indicator" title="音色加载状态"></span>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>对白音色</span>
+                        <select id="tts-dialogue-voice-selector"></select>
+                    </div>
+
+                    <div class="setting-item" id="tts-refresh-voices-row" style="display: none;">
+                        <span>IndexTTS 预设</span>
+                        <button id="btn-refresh-tts-voices" class="control-button">刷新预设</button>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>字体与排版</span><button id="btn-font-settings" class="control-button">调整</button>
+                    </div>
+
+                    <div class="setting-item">
+                        <span>字体颜色</span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <input type="color" id="text-color-picker">
+                            <button id="btn-reset-text-color" class="control-button" style="padding: 2px 8px; font-size: 12px;">重置</button>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span>背景颜色</span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <input type="color" id="bg-color-picker">
+                            <button id="btn-reset-bg-color" class="control-button" style="padding: 2px 8px; font-size: 12px;">重置</button>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span>自定义背景图</span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <label for="bg-image-input" class="control-button" style="padding: 5px 8px;">选择</label>
+                            <input type="file" id="bg-image-input" accept="image/*" style="display:none;">
+                            <button id="btn-clear-bg-image" class="control-button">清除</button>
+                        </div>
+                    </div>
+                    
+                    <div class="setting-item"><span>AI 功能设置</span><button id="btn-ai-settings" class="control-button">配置</button></div>
+                    <div class="setting-item" style="justify-content: center; padding-top: 20px;"><button id="btn-factory-reset" class="control-button" style="background-color: var(--danger-color); color: white;">恢复所有默认设置</button></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="font-settings-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>字体与排版设置</h2><button class="close-button">&times;</button></div>
+                <div id="font-settings-list">
+                    <div class="setting-item font-control">
+                        <span>字号</span>
+                        <input type="range" id="font-size-slider" min="12" max="36" step="1">
+                        <span id="font-size-value" class="slider-value">20px</span>
+                        <button id="reset-font-size" class="control-button reset-btn">重置</button>
+                    </div>
+                    <div class="setting-item font-control">
+                        <span>字距</span>
+                        <input type="range" id="letter-spacing-slider" min="0" max="5" step="0.1">
+                        <span id="letter-spacing-value" class="slider-value">0.0px</span>
+                        <button id="reset-letter-spacing" class="control-button reset-btn">重置</button>
+                    </div>
+                    <div class="setting-item font-control">
+                        <span>行距</span>
+                        <input type="range" id="line-height-slider" min="1.2" max="3.0" step="0.1">
+                        <span id="line-height-value" class="slider-value">1.9</span>
+                        <button id="reset-line-height" class="control-button reset-btn">重置</button>
+                    </div>
+                    <div class="setting-item font-control">
+                        <span>段距</span>
+                        <input type="range" id="paragraph-spacing-slider" min="0.5" max="3.0" step="0.1">
+                        <span id="paragraph-spacing-value" class="slider-value">1.0em</span>
+                        <button id="reset-paragraph-spacing" class="control-button reset-btn">重置</button>
+                    </div>
+                    <div class="setting-item">
+                        <span>自定义字体</span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <label for="font-file-input" class="control-button" style="padding: 5px 8px;">选择</label>
+                            <input type="file" id="font-file-input" accept=".ttf,.otf,.woff,.woff2" style="display:none;">
+                            <button id="btn-clear-font" class="control-button">清除</button>
+                        </div>
+                        <span id="custom-font-status" style="flex-basis: 100%; text-align: right; font-size: 12px; opacity: 0.7; margin-top: 5px;">未设置</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="ai-settings-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>AI 功能设置</h2><button class="close-button">&times;</button></div>
+                <div class="ai-settings-list">
+                    <div class="ai-menu-group">
+                        <span>LLM 功能设置</span>
+                        <div class="setting-item"><span>API 地址</span><input type="text" id="ai-api-url" placeholder="例如: https://api.openai.com/v1"></div>
+                        <div class="setting-item"><span>API Key</span><input type="text" id="ai-api-key"></div>
+                        <div class="setting-item"><span>模型名称</span><input type="text" id="ai-model-name" placeholder="例如: gpt-3.5-turbo"></div>
+                    </div>
+                    <div class="ai-menu-group">
+                        <span>图像生成设置</span>
+                        <div class="setting-item">
+                            <span>生图服务</span>
+                            <select id="image-provider-selector">
+                                <option value="comfyui">ComfyUI (本地)</option>
+                                <option value="nanobananapro">Nano Banana Pro</option>
+                            </select>
+                        </div>
+                        <div id="comfyui-settings-group">
+                            <div class="setting-item"><span>ComfyUI API 地址</span><input type="text" id="comfyui-api-url" placeholder="例如: http://127.0.0.1:8002"></div>
+                        </div>
+                        <div id="nanobananapro-settings-group" style="display: none;">
+                            <div class="setting-item"><span>Nano Banana Pro API Key</span><input type="text" id="nanobananapro-api-key" placeholder="输入你的 API Key"></div>
+                            <div class="setting-item"><span>生图模型名称</span><input type="text" id="nanobananapro-model" placeholder="例如: gemini-2.0-flash-preview-image-generation"></div>
+                        </div>
+                    </div>
+                    <div class="ai-menu-group">
+                        <span>自定义提示词</span>
+                        <div class="setting-item custom-prompt-settings-entry">
+                            <span>总结 / 续写 / 翻译 / 评论提示词</span>
+                            <button id="btn-open-custom-prompts" type="button" class="control-button">编辑自定义提示词</button>
+                        </div>
+                        <div class="setting-item reader-persona-settings-entry">
+                            <span>读者人格提示词</span>
+                            <button id="btn-open-reader-persona-settings" type="button" class="control-button">编辑读者人格</button>
+                        </div>
+                    </div>
+                    <div class="ai-menu-group">
+                        <span>段评数据</span>
+                        <div class="setting-item">
+                            <span>当前小说全部段评</span>
+                            <button id="btn-clear-book-comments" type="button" class="control-button danger-button">清除全部段评</button>
+                        </div>
+                    </div>
+                    <div class="ai-menu-group">
+                        <span>听书 (TTS) 设置</span>
+                        <div class="setting-item">
+                            <span>听书引擎</span>
+                            <select id="tts-provider-selector-ai">
+                                <option value="gptsovits">GPT-SoVITS</option>
+                                <option value="indextts">IndexTTS</option>
+                            </select>
+                        </div>
+                        <div class="setting-item"><span id="tts-api-url-label">TTS API 基地址</span><input type="text" id="tts-api-url" placeholder="例如: http://127.0.0.1:9880"></div>
+                        <div id="tts-gptsovits-voice-management">
+                            <span>TTS 音色管理</span>
+                            <ul id="tts-voice-list" class="modal-list"></ul>
+                            <div class="button-group" style="justify-content: flex-end;">
+                               <button id="btn-add-tts-voice" class="control-button">添加新音色</button>
+                            </div>
+                        </div>
+                        <div id="tts-indextts-provider-hint" style="display: none; font-size: 13px; opacity: 0.8; margin: 8px 0 12px;">
+                            IndexTTS 音色会从服务端的预设列表自动拉取，主音色和对白音色都使用预设名称选择。
+                        </div>
+                        <div id="tts-gptsovits-params">
+                            <br>
+                            <span>TTS 全局参数</span>
+                             <div class="setting-item font-control">
+                                <span>语速</span>
+                                <input type="range" id="tts-speed-factor-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+                                <span id="tts-speed-factor-value" class="slider-value">1.0</span>
+                            </div>
+                            <div class="setting-item font-control">
+                                <span>Top_k</span>
+                                <input type="range" id="tts-top-k-slider" min="1" max="20" step="1" value="5">
+                                <span id="tts-top-k-value" class="slider-value">5</span>
+                            </div>
+                            <div class="setting-item font-control">
+                                <span>Top_p</span>
+                                <input type="range" id="tts-top-p-slider" min="0.5" max="1.0" step="0.05" value="1.0">
+                                <span id="tts-top-p-value" class="slider-value">1.0</span>
+                            </div>
+                            <div class="setting-item font-control">
+                                <span>Temperature</span>
+                                <input type="range" id="tts-temperature-slider" min="0.5" max="1.0" step="0.05" value="1.0">
+                                <span id="tts-temperature-value" class="slider-value">1.0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer"><button id="btn-save-ai-settings" class="control-button">保存</button></div>
+            </div>
+        </div>
+
+        <div id="custom-prompts-modal" class="modal">
+            <div class="modal-content custom-prompts-modal-content">
+                <div class="modal-header">
+                    <h2>自定义提示词</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div class="custom-prompts-modal-list">
+                    <div class="custom-prompt-card">
+                        <label>总结提示词（可用占位符 {len}）</label>
+                        <textarea id="ai-summary-prompt"></textarea>
+                        <div class="custom-prompt-inline-setting">
+                            <span>总结字数</span>
+                            <input type="number" id="ai-summary-length" value="150" min="50" step="10">
+                        </div>
+                    </div>
+                    <div class="custom-prompt-card">
+                        <label>续写提示词</label>
+                        <textarea id="ai-sequel-prompt"></textarea>
+                    </div>
+                    <div class="custom-prompt-card">
+                        <label>翻译提示词</label>
+                        <textarea id="ai-translation-prompt"></textarea>
+                    </div>
+                    <div class="custom-prompt-card">
+                        <label>评论提示词</label>
+                        <textarea id="ai-comment-prompt"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="reader-persona-settings-modal" class="modal">
+            <div class="modal-content reader-persona-modal-content">
+                <div class="modal-header">
+                    <h2>读者人格提示词</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div class="reader-persona-modal-toolbar">
+                    <span>每个读者会独立参与段评生成</span>
+                    <button id="btn-add-reader-persona" type="button" class="control-button">添加读者</button>
+                </div>
+                <div id="ai-reader-personas" class="reader-persona-card-list reader-persona-modal-list"></div>
+            </div>
+        </div>
+
+        <div id="tts-voice-edit-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="tts-voice-edit-modal-title">编辑音色</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div class="ai-settings-list">
+                    <div class="setting-item"><span>音色名称</span><input type="text" id="tts-voice-name" placeholder="例如: 派蒙"></div>
+                    <div class="setting-item"><span>GPT模型路径 (.ckpt)</span><input type="text" id="tts-gpt-path" placeholder="服务器上的绝对或相对路径"></div>
+                    <div class="setting-item"><span>SoVITS模型路径 (.pth)</span><input type="text" id="tts-sovits-path" placeholder="服务器上的绝对或相对路径"></div>
+                    <div class="setting-item"><span>参考音频路径</span><input type="text" id="tts-ref-audio-path" placeholder="服务器上的路径, e.g., C:\path\ref.wav"></div>
+                    <div class="setting-item"><span>参考音频文本</span><textarea id="tts-prompt-text" placeholder="参考音频对应的文本"></textarea></div>
+                    <div class="setting-item">
+                        <span>参考音频语言</span>
+                        <select id="tts-prompt-lang">
+                            <option value="zh">中文 (zh)</option>
+                            <option value="en">英文 (en)</option>
+                            <option value="ja">日文 (ja)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-save-tts-voice" class="control-button">保存音色</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="ai-menu-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>AI 功能菜单</h2><button class="close-button">&times;</button></div><div id="ai-menu-list"><div class="ai-menu-group"><span>内容生成</span><div class="button-group"><button id="btn-summary" class="control-button">总结</button><button id="btn-sequel" class="control-button">续写</button><button id="btn-translate" class="control-button">翻译</button><button id="btn-character-profiling" class="control-button">AI数据库</button><button id="btn-scene-image" class="control-button">🎨 场景生图</button></div></div><div class="ai-menu-group"><span>历史记录</span><div class="button-group"><button id="btn-summary-history" class="control-button">总结历史</button><button id="btn-sequel-history" class="control-button">续写历史</button><button id="btn-translation-history" class="control-button">翻译历史</button><button id="btn-character-history" class="control-button">人物卡片</button><button id="btn-scene-image-history" class="control-button">📷 生图历史</button></div></div></div></div></div>
+        
+        <div id="summary-choice-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>总结设置</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <div class="summary-settings-list">
+                    <div class="setting-item">
+                        <span>总结范围</span>
+                        <div class="custom-dropdown" id="summary-range-type" data-value="page">
+                            <div class="custom-dropdown-selected">页码</div>
+                            <div class="custom-dropdown-options">
+                                <div class="custom-dropdown-option selected" data-value="page">页码</div>
+                                <div class="custom-dropdown-option" data-value="chapter">章节</div>
+                                <div class="custom-dropdown-option" data-value="none">无</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setting-item" id="summary-page-range-selector">
+                        <span>起止页码</span>
+                        <input type="text" id="summary-page-range" placeholder="例如: 10-12">
+                    </div>
+                    <div class="setting-item" id="summary-chapter-range-selector" style="display:none;">
+                        <span>起止章节</span>
+                        <input type="text" id="summary-chapter-range" placeholder="例如: 3-4 (章节序号)">
+                    </div>
+                    <div class="setting-item" style="padding-bottom: 0;">
+                        <span>选择参考上下文 (可选)</span>
+                    </div>
+                    <ul id="summary-context-list" class="modal-list" style="max-height: 20vh; border: 1px solid var(--border-color); padding: 5px; cursor: default; border-top: none;"></ul>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-generate-summary" class="control-button">生成总结</button>
+                </div>
+            </div>
+        </div>
+        
+        <div id="summary-display-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>AI 总结</h2><button class="close-button">&times;</button></div><div id="summary-content" class="page" style="height: auto; max-height: 60vh;">...</div><div class="modal-footer"><button id="btn-save-summary" class="control-button" style="display:none;">保存该总结</button></div></div></div>
+        <div id="translation-choice-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>翻译设置</h2><button class="close-button">&times;</button></div>
+                <div class="translation-settings-list">
+                    <div class="setting-item">
+                        <span>翻译范围</span>
+                        <div class="custom-dropdown" id="translation-range-type" data-value="page">
+                            <div class="custom-dropdown-selected">页码</div>
+                            <div class="custom-dropdown-options">
+                                <div class="custom-dropdown-option selected" data-value="page">页码</div>
+                                <div class="custom-dropdown-option" data-value="chapter">章节</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setting-item" id="translation-page-range-selector">
+                        <span>起止页码</span>
+                        <input type="text" id="translation-page-range" placeholder="例如: 10-12">
+                    </div>
+                    <div class="setting-item" id="translation-chapter-range-selector" style="display:none;">
+                        <span>起止章节</span>
+                        <input type="text" id="translation-chapter-range" placeholder="例如: 3-4 (章节序号)">
+                    </div>
+                    <div class="setting-item" style="padding-bottom:0;">
+                        <span>参考已有翻译 (可选，用于保持风格/术语一致)</span>
+                    </div>
+                    <ul id="translation-context-list" class="modal-list" style="max-height: 20vh; border: 1px solid var(--border-color); padding: 5px; cursor: default; border-top: none;"></ul>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-generate-translation" class="control-button">生成翻译</button>
+                </div>
+            </div>
+        </div>
+        
+        <div id="summary-history-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>总结历史</h2><button class="close-button">&times;</button></div><ul id="summary-history-list" class="modal-list"></ul></div></div>
+        <div id="sequel-history-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>续写历史</h2><button class="close-button">&times;</button></div><ul id="sequel-history-list" class="modal-list"></ul></div></div>
+        <div id="translation-history-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>翻译历史</h2><button class="close-button">&times;</button></div><ul id="translation-history-list" class="modal-list"></ul></div></div>
+        <div id="character-history-modal" class="modal"><div class="modal-content character-cards-modal"><div class="modal-header"><h2>人物卡片</h2><button class="close-button">&times;</button></div><div id="character-history-list" class="character-cards-container"></div></div></div>
+
+        <!-- AI数据库弹窗（内嵌数据浏览器） -->
+        <div id="character-form-choice-modal" class="modal">
+            <div class="modal-content ai-database-modal">
+                <div class="modal-header">
+                    <h2>📋 AI数据库</h2>
+                    <button class="close-button">&times;</button>
+                </div>
+                <!-- 统一选择范围区域 -->
+                <div class="ai-database-generate">
+                    <!-- 第一行：范围选择 -->
+                    <div class="generate-row">
+                        <div class="generate-item">
+                            <span>范围</span>
+                            <div class="custom-dropdown" id="character-range-type" data-value="chapter">
+                                <div class="custom-dropdown-selected">章节</div>
+                                <div class="custom-dropdown-options">
+                                    <div class="custom-dropdown-option" data-value="page">页码</div>
+                                    <div class="custom-dropdown-option selected" data-value="chapter">章节</div>
+                                    <div class="custom-dropdown-option" data-value="sequel">续写</div>
+                                    <div class="custom-dropdown-option" data-value="none">无</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="generate-item range-input" id="character-page-range-selector" style="display:none;">
+                            <input type="text" id="character-page-range" placeholder="如: 1-5">
+                        </div>
+                        <div class="generate-item range-input" id="character-chapter-range-selector">
+                            <input type="text" id="character-chapter-range" placeholder="如: 1-2">
+                        </div>
+                        <!-- 续写历史选择器 -->
+                        <div class="generate-item range-input" id="character-sequel-range-selector" style="display:none;">
+                            <select id="character-sequel-select" class="form-select" style="flex:1; min-width:0; max-width:200px; padding:4px 6px; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-size:0.8em; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">
+                                <option value="">-- 选择续写 --</option>
+                            </select>
+                        </div>
+                        <!-- 生图尺寸选择（仅生图标签页显示） -->
+                        <div class="generate-item" id="unified-image-size-selector" style="display:none;">
+                            <span>尺寸</span>
+                            <div class="custom-dropdown" id="unified-image-size" data-value="landscape_4_3">
+                                <div class="custom-dropdown-selected">4:3横</div>
+                                <div class="custom-dropdown-options">
+                                    <div class="custom-dropdown-option" data-value="square">1:1</div>
+                                    <div class="custom-dropdown-option" data-value="portrait_3_4">3:4纵</div>
+                                    <div class="custom-dropdown-option" data-value="portrait_9_16">9:16纵</div>
+                                    <div class="custom-dropdown-option selected" data-value="landscape_4_3">4:3横</div>
+                                    <div class="custom-dropdown-option" data-value="landscape_16_9">16:9横</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 续写版本选择（仅续写标签页显示） -->
+                        <div class="generate-item" id="unified-version-selector" style="display:none;">
+                            <span>版本</span>
+                            <div class="custom-dropdown" id="unified-data-version" data-value="current">
+                                <div class="custom-dropdown-selected">当前</div>
+                                <div class="custom-dropdown-options" id="unified-version-options">
+                                    <div class="custom-dropdown-option selected" data-value="current">当前版本</div>
+                                </div>
+                            </div>
+                        </div>
+                        <button id="btn-generate-all-characters" class="control-button generate-btn">📋 开始</button>
+                    </div>
+                </div>
+                <!-- 数据浏览器标签页 -->
+                <div class="data-browser-tabs" id="ai-database-tabs"></div>
+                <!-- 参考上下文区域（可折叠，移到标签页下方） -->
+                <div class="ai-database-context" id="ai-database-context-section" style="display:none;">
+                    <div class="context-header collapsed" id="context-header-toggle">
+                        <span>📚 参考上下文</span>
+                        <span class="context-toggle-icon">▼</span>
+                    </div>
+                    <div class="context-body collapsed" id="context-body">
+                        <ul id="unified-context-list" class="context-list"></ul>
+                    </div>
+                </div>
+                <!-- 续写行动选项区域（仅续写标签页显示） -->
+                <div class="ai-database-actions" id="unified-action-section" style="display:none;">
+                    <div class="action-section-header">
+                        <span>🎮 行动选项</span>
+                        <button id="btn-unified-generate-actions" class="control-button action-btn-small">生成</button>
+                    </div>
+                    <div id="unified-action-options-list" class="action-options-list">
+                        <p class="no-data-hint">点击"生成"获取剧情引导</p>
+                    </div>
+                    <div class="custom-action-row">
+                        <input type="text" id="unified-custom-action-input" class="form-input" placeholder="自定义行动...">
+                        <button id="btn-unified-custom-action" class="control-button">执行</button>
+                    </div>
+                </div>
+                <div class="data-browser-body" id="ai-database-body"></div>
+                <!-- 底部操作栏 -->
+                <div class="ai-database-footer">
+                    <button id="btn-clear-all-data" class="control-button danger-btn">🗑️ 清空数据</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="scene-image-choice-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>场景生图设置</h2><button class="close-button">&times;</button></div>
+                <div class="scene-image-settings-list">
+                    <div class="setting-item">
+                        <span>选择范围</span>
+                        <div class="custom-dropdown" id="scene-image-range-type" data-value="page">
+                            <div class="custom-dropdown-selected">页码</div>
+                            <div class="custom-dropdown-options">
+                                <div class="custom-dropdown-option selected" data-value="page">页码</div>
+                                <div class="custom-dropdown-option" data-value="chapter">章节</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setting-item" id="scene-image-page-range-selector">
+                        <span>起止页码</span>
+                        <input type="text" id="scene-image-page-range" placeholder="例如: 10-12">
+                    </div>
+                    <div class="setting-item" id="scene-image-chapter-range-selector" style="display:none;">
+                        <span>起止章节</span>
+                        <input type="text" id="scene-image-chapter-range" placeholder="例如: 3-4 (章节序号)">
+                    </div>
+                    <div class="setting-item">
+                        <span>图片尺寸</span>
+                        <div class="custom-dropdown" id="scene-image-size" data-value="landscape_4_3">
+                            <div class="custom-dropdown-selected">4:3 横向 (1152x896)</div>
+                            <div class="custom-dropdown-options">
+                                <div class="custom-dropdown-option" data-value="square">1:1 正方形 (1024x1024)</div>
+                                <div class="custom-dropdown-option" data-value="portrait_3_4">3:4 纵向 (896x1152)</div>
+                                <div class="custom-dropdown-option" data-value="portrait_9_16">9:16 纵向 (768x1344)</div>
+                                <div class="custom-dropdown-option selected" data-value="landscape_4_3">4:3 横向 (1152x896)</div>
+                                <div class="custom-dropdown-option" data-value="landscape_16_9">16:9 横向 (1344x768)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-generate-scene-image" class="control-button">生成场景图</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="scene-image-history-modal" class="modal">
+            <div class="modal-content scene-image-history-modal">
+                <div class="modal-header"><h2>生图历史</h2><button class="close-button">&times;</button></div>
+                <div id="scene-image-history-list" class="scene-image-gallery"></div>
+            </div>
+        </div>
+
+        <div id="comment-selection-popover" class="comment-selection-popover" style="display:none;">
+            <button id="btn-open-reader-comments" type="button">段评</button>
+        </div>
+
+        <div id="reader-comment-modal" class="modal reader-comment-modal">
+            <div class="reader-comment-sheet">
+                <div class="reader-comment-handle"></div>
+                <div class="reader-comment-header">
+                    <div>
+                        <h2>段评</h2>
+                        <span id="reader-comment-persona-count">0 位读者人格</span>
+                    </div>
+                    <button class="close-button" id="btn-close-reader-comments">&times;</button>
+                </div>
+                <div class="reader-comment-quote" id="comment-selected-text"></div>
+                <div class="reader-comment-toolbar">
+                    <span id="reader-comment-context-note">已自动带入前文总结和AI数据库</span>
+                    <button id="btn-generate-reader-comments" class="control-button">生成番茄段评</button>
+                </div>
+                <div id="reader-comment-list" class="reader-comment-list"></div>
+            </div>
+        </div>
+
+         <div id="sequel-choice-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header"><h2>续写设置</h2><button class="close-button">&times;</button></div>
+                <div class="sequel-settings-list">
+                    <div class="setting-item">
+                        <span>续写范围</span>
+                        <div class="custom-dropdown" id="sequel-range-type" data-value="page">
+                            <div class="custom-dropdown-selected">页码</div>
+                            <div class="custom-dropdown-options">
+                                <div class="custom-dropdown-option selected" data-value="page">页码</div>
+                                <div class="custom-dropdown-option" data-value="chapter">章节</div>
+                                <div class="custom-dropdown-option" data-value="none">无</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setting-item" id="sequel-page-range-selector">
+                        <span>起止页码</span>
+                        <input type="text" id="sequel-page-range" placeholder="例如: 10-12">
+                    </div>
+                    <div class="setting-item" id="sequel-chapter-range-selector" style="display:none;">
+                        <span>起止章节</span>
+                        <input type="text" id="sequel-chapter-range" placeholder="例如: 3-4 (章节序号)">
+                    </div>
+                    <div class="setting-item" style="padding-bottom:0;">
+                        <span>选择参考上下文 (可选)</span>
+                    </div>
+                    <ul id="sequel-summary-context-list" class="modal-list" style="max-height: 20vh; border: 1px solid var(--border-color); padding: 5px; cursor: default; border-top: none;"></ul>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-generate-sequel" class="control-button">生成续写</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="calculation-ruler" style="visibility: hidden; position: absolute; top: -9999px; left: -9999px;"></div>
+    </div>
+    
+    <div id="tts-player-controls" style="display: none;">
+        <span id="tts-status">已停止</span>
+        <button id="btn-tts-prev" title="上一段">⏮</button>
+        <button id="btn-tts-play-pause" title="播放/暂停">▶️</button>
+        <button id="btn-tts-stop" title="停止">⏹️</button>
+        <button id="btn-tts-next" title="下一段">⏭️</button>
+    </div>
+
+    <script src="jszip.min.js"></script>
+    <!-- 按依赖顺序加载 JS 文件 -->
+    <script src="js/vars.js"></script>
+    <script src="js/dom.js"></script>
+    <script src="js/db.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/parser.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/settings.js"></script>
+    <script src="js/tts.js"></script>
+    <script src="js/search.js"></script>
+    <script src="js/core.js"></script>
+    <script src="js/ai.js"></script>
+    <script src="js/characterForm.js"></script>
+    <script src="js/comments.js"></script>
+    <script src="js/phoneDynamic.js"></script>
+    <script src="js/phoneEmail.js"></script>
+    <script src="js/phoneCall.js"></script>
+    <script src="js/phoneBrowser.js"></script>
+    <script src="js/phoneForum.js"></script>
+    <script src="js/phoneMap.js"></script>
+    <script src="js/phoneCalendar.js"></script>
+    <script src="js/phoneGroupChat.js"></script>
+    <script src="js/phoneLive.js"></script>
+    <script src="js/phoneMusic.js"></script>
+    <script src="js/fanqie.js"></script>
+    <script src="js/events.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
