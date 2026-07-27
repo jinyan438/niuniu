@@ -12,3 +12,15 @@ Thumbs.db
 *.aab
 *.log
 npm-debug.log*
+
+# Secrets and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+google-services.json
