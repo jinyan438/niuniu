@@ -129,6 +129,10 @@
             if (e.target && e.target.closest && e.target.closest('.book-actions')) {
                 NR.state.isShelfDragging = false;
                 NR.state.ignoreNextClick = false;
+                if (window.getSelection) {
+                    var selection = window.getSelection();
+                    if (selection && selection.removeAllRanges) selection.removeAllRanges();
+                }
                 return;
             }
             if (e.button !== 0 && e.type.startsWith('mouse')) return;
