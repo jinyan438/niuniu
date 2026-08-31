@@ -16,8 +16,9 @@
                 <h1>我的书架</h1>
                 <div id="bookshelf-filter-container">
                     <label for="bookshelf-filter">分类:</label>
-                    <select id="bookshelf-filter"></select>
+                <select id="bookshelf-filter"></select>
                 </div>
+                <button id="btn-book-source" class="control-button" title="书源"><i class="fa-solid fa-compass"></i> 书源</button>
                 <button id="btn-fanqie-search" class="control-button">🔍 搜书</button>
                 <button id="btn-export-book" class="control-button">📤 导出</button>
                 <label for="file-input" class="control-button">打开文件</label>
@@ -25,6 +26,103 @@
                 <label for="import-folder-input" class="control-button">导入文件夹</label>
             </div>
             <div id="bookshelf-grid"></div>
+        </div>
+
+        <section id="book-source-view" class="book-source-view" style="display:none;" aria-label="书源">
+            <header class="source-appbar">
+                <button id="source-back" class="source-icon-button" type="button" title="返回书架" aria-label="返回书架"><i class="fa-solid fa-arrow-left"></i></button>
+                <h1 id="source-page-title">书源</h1>
+                <button id="source-refresh" class="source-icon-button" type="button" title="刷新" aria-label="刷新"><i class="fa-solid fa-rotate"></i></button>
+                <button id="source-import-open" class="source-icon-button" type="button" title="导入书源" aria-label="导入书源"><i class="fa-solid fa-file-import"></i></button>
+            </header>
+
+            <nav class="source-tabs" aria-label="书源页面">
+                <button class="source-tab active" type="button" data-source-tab="explore"><i class="fa-solid fa-compass"></i><span>发现</span></button>
+                <button class="source-tab" type="button" data-source-tab="search"><i class="fa-solid fa-magnifying-glass"></i><span>搜索</span></button>
+                <button class="source-tab" type="button" data-source-tab="manage"><i class="fa-solid fa-database"></i><span>书源</span></button>
+            </nav>
+
+            <div class="source-panel active" data-source-panel="explore">
+                <div class="source-toolbar">
+                    <div class="source-search-box">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <input id="source-explore-filter" type="search" placeholder="筛选发现" autocomplete="off">
+                    </div>
+                    <select id="source-explore-selector" class="source-select" aria-label="发现书源"></select>
+                </div>
+                <div id="source-explore-kinds" class="source-kind-grid"></div>
+                <div id="source-explore-results" class="source-book-list"></div>
+                <button id="source-explore-more" class="source-more-button" type="button" hidden>加载更多</button>
+            </div>
+
+            <div class="source-panel" data-source-panel="search">
+                <form id="source-search-form" class="source-global-search">
+                    <div class="source-search-box">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <input id="source-search-keyword" type="search" placeholder="书名或作者" autocomplete="off">
+                    </div>
+                    <button type="submit" class="source-primary-button">搜索</button>
+                </form>
+                <div class="source-search-options">
+                    <select id="source-search-scope" class="source-select" aria-label="搜索范围">
+                        <option value="enabled">全部启用书源</option>
+                        <option value="current">当前发现书源</option>
+                    </select>
+                    <span id="source-search-summary" class="source-muted"></span>
+                </div>
+                <div id="source-search-results" class="source-book-list"></div>
+            </div>
+
+            <div class="source-panel" data-source-panel="manage">
+                <div class="source-manage-toolbar">
+                    <div class="source-search-box">
+                        <i class="fa-solid fa-filter"></i>
+                        <input id="source-manage-filter" type="search" placeholder="筛选书源" autocomplete="off">
+                    </div>
+                    <select id="source-group-filter" class="source-select" aria-label="书源分组"><option value="">全部分组</option></select>
+                </div>
+                <div id="source-manage-summary" class="source-manage-summary"></div>
+                <div id="source-list" class="source-list"></div>
+            </div>
+
+            <div id="source-detail" class="source-detail" hidden>
+                <header class="source-detail-appbar">
+                    <button id="source-detail-back" class="source-icon-button" type="button" title="返回" aria-label="返回"><i class="fa-solid fa-arrow-left"></i></button>
+                    <h2>书籍详情</h2>
+                </header>
+                <div id="source-detail-content" class="source-detail-content"></div>
+            </div>
+
+            <div id="source-toast" class="source-toast" role="status" aria-live="polite"></div>
+        </section>
+
+        <div id="source-import-modal" class="modal">
+            <div class="modal-content source-import-dialog">
+                <div class="modal-header">
+                    <h2>导入书源</h2>
+                    <button id="source-import-close" class="close-button" type="button" aria-label="关闭">&times;</button>
+                </div>
+                <div class="source-import-body">
+                    <textarea id="source-import-text" class="source-import-text" placeholder="粘贴书源 JSON、网络地址或 Legado 分享链接"></textarea>
+                    <label class="source-file-button" for="source-import-file"><i class="fa-solid fa-folder-open"></i> 选择文件</label>
+                    <input id="source-import-file" type="file" accept=".json,.txt,.js,.gz,application/json,text/plain,text/javascript,application/gzip" multiple hidden>
+                    <div id="source-import-file-names" class="source-muted"></div>
+                </div>
+                <div class="modal-footer">
+                    <button id="source-import-confirm" class="source-primary-button" type="button"><i class="fa-solid fa-file-import"></i> 导入</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="source-download-modal" class="modal">
+            <div class="modal-content source-download-dialog">
+                <div class="modal-header"><h2 id="source-download-title">正在缓存</h2></div>
+                <div class="source-download-body">
+                    <div class="source-progress-track"><div id="source-download-progress" class="source-progress-value"></div></div>
+                    <p id="source-download-status">准备中...</p>
+                    <button id="source-download-cancel" class="control-button" type="button">取消</button>
+                </div>
+            </div>
         </div>
 
         <!-- 番茄小说搜索下载模态框 -->
@@ -774,6 +872,8 @@
     <script src="js/phoneGroupChat.js"></script>
     <script src="js/phoneLive.js"></script>
     <script src="js/phoneMusic.js"></script>
+    <script src="js/bookSourceEngine.js"></script>
+    <script src="js/bookSource.js"></script>
     <script src="js/fanqie.js"></script>
     <script src="js/events.js"></script>
     <script src="js/app.js"></script>

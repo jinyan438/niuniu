@@ -15,6 +15,7 @@
 - 场景生图：支持本地 ComfyUI 或兼容的 Nano Banana Pro/Gemini 图像接口。
 - 听书：支持 GPT-SoVITS 和 IndexTTS，可配置主音色、对白音色及合成参数。
 - 搜索下载：可搜索并导入 TXT/EPUB 小说；此功能依赖第三方接口，其可用性可能发生变化。
+- Legado 书源：兼容导入 JSON、TXT、JS、GZIP、远程地址、`sourceUrls` 清单和 Legado 分享链接，支持发现分类、多源搜索、详情、目录、正文缓存与书源管理。
 
 ## 快速开始
 
@@ -56,6 +57,14 @@ Windows 下也可以运行一键打包脚本：
 4. 保存后，从阅读页的“AI数据库”菜单使用总结、翻译、续写、人物提取或场景生图。
 
 项目不内置 API Key。AI、图像和 TTS 功能均使用你自行配置的服务，相关费用、速率限制和内容政策由对应服务商决定。
+
+## 书源
+
+从书架打开“书源”，可在右上角导入本地文件、粘贴书源内容或网络地址。声明式书源支持常用 JSONPath、XPath、CSS/JSoup、正则、内嵌 JavaScript、GET/POST、请求头和分页规则；纯 JavaScript 单文件书源支持 `search`、`explore`、`getBookInfo`、`getChapters` 与 `getContent` 流程。
+
+在线书籍会按章节缓存为本地 TXT 并写入现有书架，之后沿用本项目的排版、目录、搜索、听书与 AI 阅读功能。Android 版本通过原生 HTTP 桥接处理跨域、Cookie、自定义请求头及 HTTP 站点；直接在桌面浏览器打开时，目标站点自身的 CORS 策略仍可能阻止请求。
+
+书源规则可以包含并执行 JavaScript，也可以访问任意网络地址。只导入来源可信、内容可审计的书源，并自行确认内容授权、站点条款和当地法律要求。
 
 ## 数据与隐私
 

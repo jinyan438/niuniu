@@ -7,7 +7,7 @@
         init: function() {
             var self = this;
             return new Promise(function(resolve, reject) {
-                var request = indexedDB.open("NovelReaderDatabase", 3); // 升级版本号
+                var request = indexedDB.open("NovelReaderDatabase", 4); // 升级版本号
                 request.onupgradeneeded = function(event) {
                     var db = event.target.result;
                     if (!db.objectStoreNames.contains("assets")) {
@@ -18,6 +18,9 @@
                     }
                     if (!db.objectStoreNames.contains("images")) {
                         db.createObjectStore("images", { keyPath: "id" });
+                    }
+                    if (!db.objectStoreNames.contains("bookSources")) {
+                        db.createObjectStore("bookSources", { keyPath: "bookSourceUrl" });
                     }
                 };
                 request.onsuccess = function(event) {
@@ -220,6 +223,40 @@
                 var req = store.clear();
                 req.onsuccess = resolve;
                 req.onerror = function(e) { reject("Failed to clear books: " + e.target.error); };
+            });
+        },
+        saveBookSource: function(source) {
+            var self = this;
+            return new Promise(function(resolve, reject) {
+                var store = self._getStore('bookSources', 'readwrite');
+                if (!store) { resolve(); return; }
+                var req = store.put(source);
+                req.onsuccess = resolve;
+                req.onerror = function(e) { reject(e.target.error); };
+            });
+        },
+        saveBookSources: function(sources) {
+            var self = this;
+            return Promise.all((sources || []).map(function(source) { return self.saveBookSource(source); }));
+        },
+        loadBookSources: function() {
+            var self = this;
+            return new Promise(function(resolve, reject) {
+                var store = self._getStore('bookSources', 'readonly');
+                if (!store) { resolve([]); return; }
+                var req = store.getAll();
+                req.onsuccess = function() { resolve(req.result || []); };
+                req.onerror = function(e) { reject(e.target.error); };
+            });
+        },
+        deleteBookSource: function(sourceUrl) {
+            var self = this;
+            return new Promise(function(resolve, reject) {
+                var store = self._getStore('bookSources', 'readwrite');
+                if (!store) { resolve(); return; }
+                var req = store.delete(sourceUrl);
+                req.onsuccess = resolve;
+                req.onerror = function(e) { reject(e.target.error); };
             });
         }
     };

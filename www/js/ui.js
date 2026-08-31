@@ -4,11 +4,15 @@
 
     NR.showReaderView = function() {
         NR.els['bookshelf-view'].style.display = 'none';
+        var sourceView = document.getElementById('book-source-view');
+        if (sourceView) sourceView.style.display = 'none';
         NR.els.readerView.style.display = 'flex';
     };
 
     NR.showBookshelfView = function() {
         NR.els.readerView.style.display = 'none';
+        var sourceView = document.getElementById('book-source-view');
+        if (sourceView) sourceView.style.display = 'none';
         NR.els['bookshelf-view'].style.display = 'flex';
         NR.populateFilterDropdown();
         NR.renderBookshelf();

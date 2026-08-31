@@ -1,0 +1,581 @@
+// Book source discovery, search, management and online book import UI.
+(function() {
+    'use strict';
+    var NR = window.NovelReader;
+    if (!NR || !NR.BookSourceEngine || !NR.BookSourceImporter) return;
+
+    var state = {
+        initialized: false,
+        sources: [],
+        activeTab: 'explore',
+        activeSourceUrl: '',
+        activeKind: null,
+        explorePage: 1,
+        exploreBusy: false,
+        searchBusy: false,
+        selectedFiles: [],
+        currentDetail: null,
+        downloadController: null
+    };
+    var engine = new NR.BookSourceEngine();
+    var el = {};
+
+    function byId(id) { return document.getElementById(id); }
+    function escapeHtml(value) { return NR.escapeHtml ? NR.escapeHtml(String(value || '')) : String(value || '').replace(/[&<>"']/g, function(ch) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]; }); }
+    function sourceByUrl(url) { return state.sources.find(function(source) { return source.bookSourceUrl === url; }); }
+    function activeSource() { return sourceByUrl(state.activeSourceUrl) || state.sources.find(function(source) { return source.enabledExplore && source.exploreUrl; }) || state.sources[0] || null; }
+
+    function cacheElements() {
+        [
+            'book-source-view', 'btn-book-source', 'source-back', 'source-page-title', 'source-refresh', 'source-import-open',
+            'source-explore-filter', 'source-explore-selector', 'source-explore-kinds', 'source-explore-results', 'source-explore-more',
+            'source-search-form', 'source-search-keyword', 'source-search-scope', 'source-search-summary', 'source-search-results',
+            'source-manage-filter', 'source-group-filter', 'source-manage-summary', 'source-list',
+            'source-detail', 'source-detail-back', 'source-detail-content', 'source-toast',
+            'source-import-modal', 'source-import-close', 'source-import-text', 'source-import-file', 'source-import-file-names', 'source-import-confirm',
+            'source-download-modal', 'source-download-title', 'source-download-progress', 'source-download-status', 'source-download-cancel'
+        ].forEach(function(id) { el[id] = byId(id); });
+        el.tabs = Array.from(document.querySelectorAll('.source-tab'));
+        el.panels = Array.from(document.querySelectorAll('.source-panel'));
+    }
+
+    function toast(message, isError) {
+        el['source-toast'].textContent = message;
+        el['source-toast'].classList.toggle('error', !!isError);
+        el['source-toast'].classList.add('show');
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(function() { el['source-toast'].classList.remove('show'); }, 2800);
+    }
+
+    function emptyState(icon, title, action) {
+        return '<div class="source-empty"><i class="fa-solid ' + icon + '"></i><strong>' + escapeHtml(title) + '</strong>' +
+            (action ? '<button type="button" class="source-primary-button" data-source-action="' + escapeHtml(action) + '">导入书源</button>' : '') + '</div>';
+    }
+
+    function setBusy(container, text) {
+        container.innerHTML = '<div class="source-loading"><span class="source-spinner"></span><span>' + escapeHtml(text || '加载中...') + '</span></div>';
+    }
+
+    function showView() {
+        NR.els.readerView.style.display = 'none';
+        NR.els['bookshelf-view'].style.display = 'none';
+        el['book-source-view'].style.display = 'flex';
+        closeDetail();
+        switchTab(state.activeTab);
+    }
+
+    function hideView() {
+        closeDetail();
+        NR.showBookshelfView();
+    }
+
+    function switchTab(tab) {
+        state.activeTab = tab;
+        el.tabs.forEach(function(button) { button.classList.toggle('active', button.dataset.sourceTab === tab); });
+        el.panels.forEach(function(panel) { panel.classList.toggle('active', panel.dataset.sourcePanel === tab); });
+        el['source-page-title'].textContent = tab === 'explore' ? '发现' : tab === 'search' ? '搜索' : '书源管理';
+        if (tab === 'explore') renderExplore();
+        else if (tab === 'manage') renderManage();
+    }
+
+    async function loadSources() {
+        try {
+            state.sources = (await NR.storageDB.loadBookSources()).map(NR.BookSourceEngine.normalizeSource);
+        } catch (e) {
+            console.error('[BookSource] 加载书源失败:', e);
+            state.sources = [];
+        }
+        state.sources.sort(function(a, b) { return (a.customOrder || 0) - (b.customOrder || 0) || a.bookSourceName.localeCompare(b.bookSourceName, 'zh-CN'); });
+        if (!sourceByUrl(state.activeSourceUrl)) {
+            var first = state.sources.find(function(source) { return source.enabledExplore && source.exploreUrl; }) || state.sources[0];
+            state.activeSourceUrl = first ? first.bookSourceUrl : '';
+        }
+        renderSourceSelector();
+        renderManage();
+    }
+
+    function renderSourceSelector() {
+        var exploreSources = state.sources.filter(function(source) { return source.enabled && source.enabledExplore && source.exploreUrl; });
+        el['source-explore-selector'].innerHTML = '';
+        if (!exploreSources.length) {
+            el['source-explore-selector'].innerHTML = '<option value="">暂无发现书源</option>';
+            return;
+        }
+        exploreSources.forEach(function(source) {
+            var option = document.createElement('option');
+            option.value = source.bookSourceUrl;
+            option.textContent = source.bookSourceName;
+            el['source-explore-selector'].appendChild(option);
+        });
+        if (!exploreSources.some(function(source) { return source.bookSourceUrl === state.activeSourceUrl; })) state.activeSourceUrl = exploreSources[0].bookSourceUrl;
+        el['source-explore-selector'].value = state.activeSourceUrl;
+    }
+
+    function kindControl(kind, index) {
+        var type = String(kind.type || 'url').toLowerCase();
+        if (type === 'text') {
+            return '<label class="source-kind-input"><span>' + escapeHtml(kind.title) + '</span><input type="text" data-kind-index="' + index + '" value="' + escapeHtml(kind.default || '') + '"></label>';
+        }
+        if (type === 'select') {
+            var chars = Array.isArray(kind.chars) ? kind.chars : [];
+            return '<label class="source-kind-select"><span>' + escapeHtml(kind.title) + '</span><select data-kind-index="' + index + '">' + chars.map(function(value) { return '<option' + (value === kind.default ? ' selected' : '') + '>' + escapeHtml(value) + '</option>'; }).join('') + '</select></label>';
+        }
+        if (type === 'toggle') {
+            return '<button type="button" class="source-kind-pill source-kind-toggle" data-kind-index="' + index + '">' + escapeHtml(kind.title) + '</button>';
+        }
+        return '<button type="button" class="source-kind-pill' + (state.activeKind && state.activeKind._index === index ? ' active' : '') + '" data-kind-index="' + index + '">' + escapeHtml(kind.title) + '</button>';
+    }
+
+    function renderExplore() {
+        renderSourceSelector();
+        var source = activeSource();
+        if (!source || !source.exploreUrl) {
+            el['source-explore-kinds'].innerHTML = '';
+            el['source-explore-results'].innerHTML = emptyState('fa-file-circle-plus', '导入带发现规则的书源', 'import');
+            el['source-explore-more'].hidden = true;
+            return;
+        }
+        var filter = el['source-explore-filter'].value.trim().toLowerCase();
+        var kinds;
+        try { kinds = engine.parseExploreKinds(source); } catch (e) {
+            el['source-explore-kinds'].innerHTML = '';
+            el['source-explore-results'].innerHTML = emptyState('fa-triangle-exclamation', e.message);
+            return;
+        }
+        kinds = kinds.map(function(kind, index) { return Object.assign({ _index: index }, kind); });
+        var shownKinds = filter ? kinds.filter(function(kind) { return String(kind.title).toLowerCase().includes(filter); }) : kinds;
+        el['source-explore-kinds'].innerHTML = shownKinds.map(function(kind) { return kindControl(kind, kind._index); }).join('');
+        el['source-explore-kinds'].dataset.kinds = JSON.stringify(kinds);
+        if (!kinds.length) {
+            el['source-explore-results'].innerHTML = emptyState('fa-compass', '这个书源没有发现分类');
+            el['source-explore-more'].hidden = true;
+            return;
+        }
+        if (!state.activeKind || !kinds.some(function(kind) { return kind._index === state.activeKind._index; })) {
+            state.activeKind = kinds.find(function(kind) { return (kind.type || 'url') === 'url' && kind.url; }) || null;
+            if (state.activeKind) loadExplore(true);
+        }
+    }
+
+    async function loadExplore(reset) {
+        var source = activeSource();
+        if (!source || !state.activeKind || !state.activeKind.url || state.exploreBusy) return;
+        if (reset) {
+            state.explorePage = 1;
+            setBusy(el['source-explore-results'], '正在加载 ' + state.activeKind.title);
+        }
+        state.exploreBusy = true;
+        el['source-explore-more'].disabled = true;
+        try {
+            var books = await engine.explore(source, state.activeKind.url, state.explorePage);
+            if (reset) el['source-explore-results'].innerHTML = '';
+            appendBooks(el['source-explore-results'], books);
+            if (!books.length && reset) el['source-explore-results'].innerHTML = emptyState('fa-book-open', '这个分类暂时没有内容');
+            el['source-explore-more'].hidden = books.length === 0;
+            state.explorePage++;
+        } catch (e) {
+            console.error('[BookSource] 发现加载失败:', e);
+            if (reset) el['source-explore-results'].innerHTML = emptyState('fa-triangle-exclamation', '加载失败：' + e.message);
+            else toast('加载失败：' + e.message, true);
+            el['source-explore-more'].hidden = true;
+        } finally {
+            state.exploreBusy = false;
+            el['source-explore-more'].disabled = false;
+        }
+    }
+
+    function bookCard(book) {
+        var data = encodeURIComponent(JSON.stringify(book));
+        var meta = [book.author, book.kind, book.wordCount, book.lastChapter].filter(Boolean);
+        return '<article class="source-book-item" data-book="' + data + '">' +
+            '<div class="source-book-cover">' + (book.coverUrl ? '<img src="' + escapeHtml(book.coverUrl) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '<span>' + escapeHtml((book.name || '书').slice(0, 4)) + '</span>') + '</div>' +
+            '<div class="source-book-copy"><h3>' + escapeHtml(book.name || '未命名') + '</h3><p class="source-book-meta">' + escapeHtml(meta.join(' · ') || '信息暂无') + '</p>' +
+            (book.intro ? '<p class="source-book-intro">' + escapeHtml(book.intro) + '</p>' : '') +
+            '<span class="source-badge">' + escapeHtml(book.sourceName || '') + '</span></div><i class="fa-solid fa-chevron-right source-chevron"></i></article>';
+    }
+
+    function appendBooks(container, books) {
+        if (!books || !books.length) return;
+        container.insertAdjacentHTML('beforeend', books.map(bookCard).join(''));
+    }
+
+    async function searchSources(keyword) {
+        if (state.searchBusy) return;
+        var scope = el['source-search-scope'].value;
+        var sources = state.sources.filter(function(source) { return source.enabled && (source.searchUrl || source.mainJs); });
+        if (scope === 'current') {
+            var current = activeSource();
+            sources = current && current.enabled && (current.searchUrl || current.mainJs) ? [current] : [];
+        }
+        if (!sources.length) {
+            el['source-search-results'].innerHTML = emptyState('fa-file-circle-plus', '没有已启用的搜索书源', 'import');
+            return;
+        }
+        state.searchBusy = true;
+        el['source-search-results'].innerHTML = '';
+        el['source-search-summary'].textContent = '0 / ' + sources.length + ' 个书源';
+        var completed = 0;
+        var resultCount = 0;
+        var failureCount = 0;
+        var seen = new Set();
+        var cursor = 0;
+
+        async function worker() {
+            while (cursor < sources.length) {
+                var source = sources[cursor++];
+                try {
+                    var books = await engine.search(source, keyword, 1);
+                    books = books.filter(function(book) {
+                        var key = [book.name, book.author, book.bookUrl].join('|');
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
+                    });
+                    resultCount += books.length;
+                    appendBooks(el['source-search-results'], books);
+                } catch (e) {
+                    failureCount++;
+                    console.warn('[BookSource] 搜索失败:', source.bookSourceName, e);
+                } finally {
+                    completed++;
+                    el['source-search-summary'].textContent = completed + ' / ' + sources.length + ' 个书源 · ' + resultCount + ' 本' + (failureCount ? ' · ' + failureCount + ' 失败' : '');
+                }
+            }
+        }
+
+        try {
+            await Promise.all(Array.from({ length: Math.min(4, sources.length) }, worker));
+            if (!resultCount) el['source-search-results'].innerHTML = emptyState('fa-magnifying-glass', '没有找到相关书籍');
+        } finally {
+            state.searchBusy = false;
+        }
+    }
+
+    function groupsForSource(source) {
+        return String(source.bookSourceGroup || '').split(/[,;，；\n]+/).map(function(group) { return group.trim(); }).filter(Boolean);
+    }
+
+    function renderManage() {
+        if (!el['source-list']) return;
+        var groups = new Set();
+        state.sources.forEach(function(source) { groupsForSource(source).forEach(function(group) { groups.add(group); }); });
+        var selectedGroup = el['source-group-filter'].value;
+        el['source-group-filter'].innerHTML = '<option value="">全部分组</option>' + Array.from(groups).sort().map(function(group) { return '<option value="' + escapeHtml(group) + '">' + escapeHtml(group) + '</option>'; }).join('');
+        el['source-group-filter'].value = selectedGroup;
+        var filter = el['source-manage-filter'].value.trim().toLowerCase();
+        var sources = state.sources.filter(function(source) {
+            return (!filter || (source.bookSourceName + ' ' + source.bookSourceUrl + ' ' + source.bookSourceGroup).toLowerCase().includes(filter)) &&
+                (!selectedGroup || groupsForSource(source).includes(selectedGroup));
+        });
+        var enabled = state.sources.filter(function(source) { return source.enabled; }).length;
+        el['source-manage-summary'].innerHTML = '<span>共 ' + state.sources.length + ' 个</span><span>已启用 ' + enabled + ' 个</span>';
+        if (!sources.length) {
+            el['source-list'].innerHTML = state.sources.length ? emptyState('fa-filter', '没有匹配的书源') : emptyState('fa-file-circle-plus', '还没有导入书源', 'import');
+            return;
+        }
+        el['source-list'].innerHTML = sources.map(function(source) {
+            var encoded = encodeURIComponent(source.bookSourceUrl);
+            var capabilities = [(source.searchUrl || source.mainJs) ? '搜索' : '', source.exploreUrl ? '发现' : '', source.mainJs ? 'JS' : '', source.bookSourceType === 1 ? '音频' : source.bookSourceType === 2 ? '图片' : '文本'].filter(Boolean);
+            return '<article class="source-manage-item" data-source-url="' + encoded + '">' +
+                '<label class="source-switch" title="启用书源"><input type="checkbox" data-source-toggle="enabled"' + (source.enabled ? ' checked' : '') + '><span></span></label>' +
+                '<div class="source-manage-copy"><h3>' + escapeHtml(source.bookSourceName) + '</h3><p>' + escapeHtml(source.bookSourceUrl) + '</p><div>' + capabilities.map(function(item) { return '<span class="source-badge">' + item + '</span>'; }).join('') + '</div></div>' +
+                '<div class="source-manage-actions"><button type="button" class="source-icon-button" data-source-action="explore" title="打开发现"' + (!source.exploreUrl ? ' disabled' : '') + '><i class="fa-solid fa-compass"></i></button>' +
+                '<button type="button" class="source-icon-button" data-source-action="export" title="导出"><i class="fa-solid fa-file-export"></i></button>' +
+                '<button type="button" class="source-icon-button danger" data-source-action="delete" title="删除"><i class="fa-solid fa-trash"></i></button></div></article>';
+        }).join('');
+    }
+
+    async function updateSource(source, field, value) {
+        source[field] = value;
+        source.lastUpdateTime = Date.now();
+        await NR.storageDB.saveBookSource(source);
+        renderSourceSelector();
+        renderManage();
+    }
+
+    async function deleteSource(source) {
+        if (!confirm('确定删除书源“' + source.bookSourceName + '”吗？')) return;
+        await NR.storageDB.deleteBookSource(source.bookSourceUrl);
+        state.sources = state.sources.filter(function(item) { return item.bookSourceUrl !== source.bookSourceUrl; });
+        if (state.activeSourceUrl === source.bookSourceUrl) state.activeSourceUrl = '';
+        renderSourceSelector();
+        renderManage();
+        toast('已删除书源');
+    }
+
+    function exportSource(source) {
+        var blob = new Blob([JSON.stringify(source, null, 2)], { type: 'application/json;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = source.bookSourceName.replace(/[\\/:*?"<>|]/g, '_') + '.json';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    function openImport() {
+        el['source-import-modal'].style.display = 'flex';
+        setTimeout(function() { el['source-import-text'].focus(); }, 30);
+    }
+
+    function closeImport() {
+        el['source-import-modal'].style.display = 'none';
+        state.selectedFiles = [];
+        el['source-import-file'].value = '';
+        el['source-import-file-names'].textContent = '';
+    }
+
+    async function readImportFile(file) {
+        if (/\.gz$/i.test(file.name) || file.type === 'application/gzip') {
+            if (typeof DecompressionStream === 'undefined') throw new Error(file.name + '：当前系统不支持 GZIP 解压');
+            var stream = file.stream().pipeThrough(new DecompressionStream('gzip'));
+            return new Response(stream).text();
+        }
+        return file.text();
+    }
+
+    async function importSources() {
+        var inputs = [];
+        var pasted = el['source-import-text'].value.trim();
+        if (pasted) inputs.push(pasted);
+        for (var i = 0; i < state.selectedFiles.length; i++) inputs.push(await readImportFile(state.selectedFiles[i]));
+        if (!inputs.length) {
+            toast('请粘贴内容或选择文件', true);
+            return;
+        }
+        el['source-import-confirm'].disabled = true;
+        el['source-import-confirm'].innerHTML = '<span class="source-spinner small"></span> 导入中';
+        try {
+            var importer = new NR.BookSourceImporter(async function(url) {
+                var response = await engine.transport.request({ url: url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json,text/plain,*/*' }, timeout: 30000 });
+                return response.body;
+            });
+            var nested = [];
+            for (var n = 0; n < inputs.length; n++) nested.push.apply(nested, await importer.parse(inputs[n]));
+            var map = new Map(state.sources.map(function(source) { return [source.bookSourceUrl, source]; }));
+            nested.forEach(function(source) { map.set(source.bookSourceUrl, source); });
+            await NR.storageDB.saveBookSources(nested);
+            state.sources = Array.from(map.values());
+            closeImport();
+            await loadSources();
+            switchTab('manage');
+            toast('已导入或更新 ' + nested.length + ' 个书源');
+        } catch (e) {
+            console.error('[BookSource] 导入失败:', e);
+            toast('导入失败：' + e.message, true);
+        } finally {
+            el['source-import-confirm'].disabled = false;
+            el['source-import-confirm'].innerHTML = '<i class="fa-solid fa-file-import"></i> 导入';
+        }
+    }
+
+    async function openBookDetail(book) {
+        var source = sourceByUrl(book.sourceUrl);
+        if (!source) {
+            toast('找不到这本书对应的书源', true);
+            return;
+        }
+        state.currentDetail = { source: source, book: book, chapters: [] };
+        el['source-detail'].hidden = false;
+        setBusy(el['source-detail-content'], '正在获取书籍详情');
+        try {
+            var info = await engine.bookInfo(source, book);
+            state.currentDetail.book = info;
+            renderBookDetail(info, [], true);
+            var chapters = await engine.toc(source, info, function(count) {
+                var status = byId('source-detail-toc-status');
+                if (status) status.textContent = '已获取 ' + count + ' 章';
+            });
+            state.currentDetail.chapters = chapters;
+            renderBookDetail(info, chapters, false);
+        } catch (e) {
+            console.error('[BookSource] 详情加载失败:', e);
+            el['source-detail-content'].innerHTML = emptyState('fa-triangle-exclamation', '详情加载失败：' + e.message);
+        }
+    }
+
+    function renderBookDetail(book, chapters, loadingToc) {
+        var source = state.currentDetail.source;
+        var tags = String(book.kind || '').split(/[,/|，、\s]+/).filter(Boolean).slice(0, 8);
+        var existingName = onlineFileName(book);
+        var exists = NR.state.bookshelf.some(function(item) { return item.name === existingName; });
+        el['source-detail-content'].innerHTML = '<section class="source-detail-hero">' +
+            '<div class="source-detail-cover">' + (book.coverUrl ? '<img src="' + escapeHtml(book.coverUrl) + '" alt="" referrerpolicy="no-referrer">' : '<span>' + escapeHtml((book.name || '书').slice(0, 4)) + '</span>') + '</div>' +
+            '<div class="source-detail-copy"><h1>' + escapeHtml(book.name || '未命名') + '</h1><p>' + escapeHtml(book.author || '作者未知') + '</p><span class="source-badge">' + escapeHtml(source.bookSourceName) + '</span>' +
+            (book.wordCount ? '<span class="source-badge">' + escapeHtml(book.wordCount) + '</span>' : '') + '</div></section>' +
+            (tags.length ? '<div class="source-detail-tags">' + tags.map(function(tag) { return '<span>' + escapeHtml(tag) + '</span>'; }).join('') + '</div>' : '') +
+            '<p class="source-detail-intro">' + escapeHtml(book.intro || '暂无简介') + '</p>' +
+            '<div class="source-detail-actions"><button type="button" class="source-primary-button" data-detail-action="read"' + (!chapters.length ? ' disabled' : '') + '><i class="fa-solid fa-book-open"></i> ' + (exists ? '更新并阅读' : '开始阅读') + '</button>' +
+            '<button type="button" class="source-secondary-button" data-detail-action="shelf"' + (!chapters.length ? ' disabled' : '') + '><i class="fa-solid fa-bookmark"></i> ' + (exists ? '更新缓存' : '加入书架') + '</button></div>' +
+            '<section class="source-toc-section"><div class="source-toc-heading"><h2>目录</h2><span id="source-detail-toc-status">' + (loadingToc ? '获取中...' : chapters.length + ' 章') + '</span></div>' +
+            '<ol class="source-toc-list">' + chapters.map(function(chapter, index) { return '<li><span>' + (index + 1) + '</span><p>' + escapeHtml(chapter.title) + '</p></li>'; }).join('') + '</ol></section>';
+    }
+
+    function closeDetail() {
+        el['source-detail'].hidden = true;
+        el['source-detail-content'].innerHTML = '';
+        state.currentDetail = null;
+    }
+
+    function onlineFileName(book) {
+        var cleanName = String(book.name || '网络小说').replace(/[\\/:*?"<>|]/g, '_').trim();
+        var cleanAuthor = String(book.author || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+        return cleanName + (cleanAuthor ? ' - ' + cleanAuthor : '') + '.txt';
+    }
+
+    async function cacheCurrentBook(openAfter) {
+        if (!state.currentDetail || !state.currentDetail.chapters.length) return;
+        var source = state.currentDetail.source;
+        var book = state.currentDetail.book;
+        var chapters = state.currentDetail.chapters;
+        var controller = new AbortController();
+        state.downloadController = controller;
+        el['source-download-modal'].style.display = 'flex';
+        el['source-download-title'].textContent = openAfter ? '正在准备阅读' : '正在加入书架';
+        el['source-download-progress'].style.width = '0%';
+        el['source-download-status'].textContent = '共 ' + chapters.length + ' 章';
+        try {
+            var content = await engine.downloadBook(source, book, chapters, {
+                concurrency: 3,
+                signal: controller.signal,
+                onProgress: function(done, total, title) {
+                    el['source-download-progress'].style.width = Math.round(done / total * 100) + '%';
+                    el['source-download-status'].textContent = done + ' / ' + total + ' · ' + title;
+                }
+            });
+            var fileName = onlineFileName(book);
+            await NR.storageDB.saveBook({
+                id: fileName,
+                content: content,
+                onlineSource: { sourceUrl: source.bookSourceUrl, sourceName: source.bookSourceName, bookUrl: book.bookUrl, tocUrl: book.tocUrl, cachedAt: Date.now() }
+            });
+            var metadata = {
+                name: fileName,
+                cover: book.coverUrl || null,
+                author: book.author || '未知',
+                chapterCount: chapters.filter(function(chapter) { return !chapter.isVolume; }).length,
+                tags: Array.from(new Set(['网络书源', source.bookSourceName].concat(String(book.kind || '').split(/[,/|，、\s]+/).filter(Boolean).slice(0, 5)))),
+                onlineSource: { sourceUrl: source.bookSourceUrl, bookUrl: book.bookUrl }
+            };
+            var existingIndex = NR.state.bookshelf.findIndex(function(item) { return item.name === fileName; });
+            if (existingIndex >= 0) NR.state.bookshelf[existingIndex] = metadata;
+            else NR.state.bookshelf.push(metadata);
+            NR.saveBookshelf();
+            el['source-download-modal'].style.display = 'none';
+            toast(existingIndex >= 0 ? '书籍缓存已更新' : '已加入书架');
+            if (openAfter) {
+                NR.state.activeSubView = 'original';
+                NR.state.currentBookCoverUrl = book.coverUrl || null;
+                NR.showReaderView();
+                await NR.loadBook(fileName, content);
+            }
+        } catch (e) {
+            el['source-download-modal'].style.display = 'none';
+            if (e.message !== '下载已取消') toast('缓存失败：' + e.message, true);
+        } finally {
+            state.downloadController = null;
+        }
+    }
+
+    function sourceUrlFromItem(item) { return decodeURIComponent(item.dataset.sourceUrl || ''); }
+
+    function bindEvents() {
+        el['btn-book-source'].addEventListener('click', showView);
+        el['source-back'].addEventListener('click', hideView);
+        el['source-detail-back'].addEventListener('click', closeDetail);
+        el.tabs.forEach(function(button) { button.addEventListener('click', function() { switchTab(button.dataset.sourceTab); }); });
+        el['source-import-open'].addEventListener('click', openImport);
+        el['source-import-close'].addEventListener('click', closeImport);
+        el['source-import-confirm'].addEventListener('click', importSources);
+        el['source-import-modal'].addEventListener('click', function(event) { if (event.target === el['source-import-modal']) closeImport(); });
+        el['source-import-file'].addEventListener('change', function(event) {
+            state.selectedFiles = Array.from(event.target.files || []);
+            el['source-import-file-names'].textContent = state.selectedFiles.map(function(file) { return file.name; }).join('、');
+        });
+        el['source-explore-selector'].addEventListener('change', function(event) {
+            state.activeSourceUrl = event.target.value;
+            state.activeKind = null;
+            el['source-explore-results'].innerHTML = '';
+            renderExplore();
+        });
+        el['source-explore-filter'].addEventListener('input', renderExplore);
+        el['source-explore-kinds'].addEventListener('click', function(event) {
+            var button = event.target.closest('[data-kind-index]');
+            if (!button || !button.matches('button')) return;
+            var kinds = JSON.parse(el['source-explore-kinds'].dataset.kinds || '[]');
+            var kind = kinds[Number(button.dataset.kindIndex)];
+            if (!kind) return;
+            var type = String(kind.type || 'url').toLowerCase();
+            if (type === 'url') {
+                state.activeKind = kind;
+                Array.from(el['source-explore-kinds'].querySelectorAll('.source-kind-pill')).forEach(function(item) { item.classList.toggle('active', item === button); });
+                loadExplore(true);
+            } else if (type === 'toggle') button.classList.toggle('active');
+        });
+        el['source-explore-more'].addEventListener('click', function() { loadExplore(false); });
+        el['source-search-form'].addEventListener('submit', function(event) {
+            event.preventDefault();
+            var keyword = el['source-search-keyword'].value.trim();
+            if (!keyword) { toast('请输入书名或作者', true); return; }
+            searchSources(keyword);
+        });
+        el['source-manage-filter'].addEventListener('input', renderManage);
+        el['source-group-filter'].addEventListener('change', renderManage);
+        el['source-list'].addEventListener('change', function(event) {
+            if (!event.target.matches('[data-source-toggle]')) return;
+            var item = event.target.closest('[data-source-url]');
+            var source = sourceByUrl(sourceUrlFromItem(item));
+            if (source) updateSource(source, event.target.dataset.sourceToggle, event.target.checked);
+        });
+        el['source-list'].addEventListener('click', function(event) {
+            var actionButton = event.target.closest('[data-source-action]');
+            if (!actionButton) return;
+            var item = actionButton.closest('[data-source-url]');
+            var source = item && sourceByUrl(sourceUrlFromItem(item));
+            if (actionButton.dataset.sourceAction === 'import') openImport();
+            else if (source && actionButton.dataset.sourceAction === 'delete') deleteSource(source);
+            else if (source && actionButton.dataset.sourceAction === 'export') exportSource(source);
+            else if (source && actionButton.dataset.sourceAction === 'explore') {
+                state.activeSourceUrl = source.bookSourceUrl;
+                state.activeKind = null;
+                switchTab('explore');
+            }
+        });
+        el['book-source-view'].addEventListener('click', function(event) {
+            var emptyAction = event.target.closest('[data-source-action="import"]');
+            if (emptyAction) { openImport(); return; }
+            var item = event.target.closest('.source-book-item');
+            if (!item) return;
+            try { openBookDetail(JSON.parse(decodeURIComponent(item.dataset.book))); } catch (e) { toast('书籍数据损坏', true); }
+        });
+        el['source-detail-content'].addEventListener('click', function(event) {
+            var button = event.target.closest('[data-detail-action]');
+            if (!button) return;
+            cacheCurrentBook(button.dataset.detailAction === 'read');
+        });
+        el['source-refresh'].addEventListener('click', function() {
+            if (state.activeTab === 'manage') loadSources();
+            else if (state.activeTab === 'explore') loadExplore(true);
+            else {
+                var keyword = el['source-search-keyword'].value.trim();
+                if (keyword) searchSources(keyword);
+            }
+        });
+        el['source-download-cancel'].addEventListener('click', function() {
+            if (state.downloadController) state.downloadController.abort();
+        });
+    }
+
+    NR.initBookSourceFeature = function() {
+        if (state.initialized) return;
+        state.initialized = true;
+        cacheElements();
+        bindEvents();
+        loadSources();
+    };
+
+    NR.bookSourceState = state;
+    NR.bookSourceEngine = engine;
+})();

@@ -13,12 +13,21 @@ import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.CookieManager;
+import java.net.CookiePolicy;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.net.URL;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Collections;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -56,6 +65,120 @@ public class MainActivity extends BridgeActivity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         webView.addJavascriptInterface(new FanqieOfficialBridge(this), "NiuniuFanqie");
+        webView.addJavascriptInterface(new BookSourceHttpBridge(), "NiuniuBookSource");
+    }
+
+    public static class BookSourceHttpBridge {
+        private final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+
+        @JavascriptInterface
+        public String request(String requestJson) {
+            HttpURLConnection connection = null;
+            try {
+                JSONObject options = new JSONObject(requestJson == null ? "{}" : requestJson);
+                String target = options.optString("url", "").trim();
+                if (target.isEmpty()) throw new IllegalArgumentException("请求地址为空");
+                URL url = new URL(target);
+                URI uri = url.toURI();
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setInstanceFollowRedirects(options.optBoolean("followRedirects", true));
+                int timeout = Math.max(1000, options.optInt("timeout", 30000));
+                connection.setConnectTimeout(timeout);
+                connection.setReadTimeout(timeout);
+                String method = options.optString("method", "GET").toUpperCase();
+                connection.setRequestMethod(method);
+                connection.setUseCaches(false);
+
+                JSONObject requestHeaders = options.optJSONObject("headers");
+                boolean hasCookieHeader = false;
+                if (requestHeaders != null) {
+                    for (java.util.Iterator<String> keys = requestHeaders.keys(); keys.hasNext();) {
+                        String key = keys.next();
+                        String value = requestHeaders.optString(key, "");
+                        connection.setRequestProperty(key, value);
+                        if ("cookie".equalsIgnoreCase(key)) hasCookieHeader = true;
+                    }
+                }
+                if (!hasCookieHeader) {
+                    Map<String, List<String>> cookieHeaders = cookieManager.get(uri, Collections.emptyMap());
+                    for (Map.Entry<String, List<String>> entry : cookieHeaders.entrySet()) {
+                        if (!entry.getValue().isEmpty()) connection.setRequestProperty(entry.getKey(), String.join("; ", entry.getValue()));
+                    }
+                }
+                connection.setRequestProperty("Accept-Encoding", "gzip");
+
+                if (!"GET".equals(method) && !"HEAD".equals(method) && options.has("body")) {
+                    byte[] bytes = options.optString("body", "").getBytes(StandardCharsets.UTF_8);
+                    connection.setDoOutput(true);
+                    connection.setFixedLengthStreamingMode(bytes.length);
+                    try (OutputStream output = connection.getOutputStream()) {
+                        output.write(bytes);
+                    }
+                }
+
+                int status = connection.getResponseCode();
+                Map<String, List<String>> responseHeaders = connection.getHeaderFields();
+                cookieManager.put(uri, responseHeaders);
+                InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+                if (stream == null) stream = connection.getInputStream();
+                if ("gzip".equalsIgnoreCase(connection.getContentEncoding())) stream = new GZIPInputStream(stream);
+                byte[] bytes = readAllBytes(stream);
+                Charset charset = responseCharset(connection.getContentType(), options.optString("charset", "utf-8"));
+
+                JSONObject headers = new JSONObject();
+                for (Map.Entry<String, List<String>> entry : responseHeaders.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) headers.put(entry.getKey(), String.join(", ", entry.getValue()));
+                }
+                return new JSONObject()
+                    .put("status", status)
+                    .put("url", connection.getURL().toString())
+                    .put("headers", headers)
+                    .put("body", new String(bytes, charset))
+                    .toString();
+            } catch (Exception error) {
+                try {
+                    return new JSONObject().put("error", error.getMessage() == null ? error.toString() : error.getMessage()).toString();
+                } catch (Exception ignored) {
+                    return "{\"error\":\"native request failed\"}";
+                }
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }
+
+        @JavascriptInterface
+        public String md5(String value) {
+            try {
+                byte[] digest = MessageDigest.getInstance("MD5").digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+                StringBuilder output = new StringBuilder(digest.length * 2);
+                for (byte item : digest) output.append(String.format("%02x", item & 0xff));
+                return output.toString();
+            } catch (Exception error) {
+                return "";
+            }
+        }
+
+        private static byte[] readAllBytes(InputStream stream) throws Exception {
+            if (stream == null) return new byte[0];
+            try (InputStream input = stream; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                return output.toByteArray();
+            }
+        }
+
+        private static Charset responseCharset(String contentType, String fallback) {
+            if (contentType != null) {
+                for (String part : contentType.split(";")) {
+                    String value = part.trim();
+                    if (value.toLowerCase().startsWith("charset=")) {
+                        try { return Charset.forName(value.substring(8).trim().replace("\"", "")); } catch (Exception ignored) { }
+                    }
+                }
+            }
+            try { return Charset.forName(fallback == null || fallback.isEmpty() ? "UTF-8" : fallback); } catch (Exception ignored) { return StandardCharsets.UTF_8; }
+        }
     }
 
     public static class FanqieOfficialBridge {

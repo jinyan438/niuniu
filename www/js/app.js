@@ -75,6 +75,7 @@
             }
 
             NR.bindEventListeners();
+            if (NR.initBookSourceFeature) NR.initBookSourceFeature();
             if (NR.initCommentFeature) NR.initCommentFeature();
             NR.showBookshelfView();
             NR.els['app-loader'].classList.add('hidden');
