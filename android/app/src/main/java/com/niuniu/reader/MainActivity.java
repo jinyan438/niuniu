@@ -123,6 +123,14 @@ public class MainActivity extends BridgeActivity {
             return new URI(target);
         }
 
+        private static String sanitizeUrl(String value) {
+            return value
+                .replace("{", "%7B")
+                .replace("}", "%7D")
+                .replace("\"", "%22")
+                .replace(" ", "%20");
+        }
+
         @JavascriptInterface
         public String request(String requestJson) {
             HttpURLConnection connection = null;
@@ -130,6 +138,7 @@ public class MainActivity extends BridgeActivity {
                 JSONObject options = new JSONObject(requestJson == null ? "{}" : requestJson);
                 String target = options.optString("url", "").trim();
                 if (target.isEmpty()) throw new IllegalArgumentException("请求地址为空");
+                target = sanitizeUrl(target);
                 URL url = new URL(target);
                 URI uri = url.toURI();
                 connection = (HttpURLConnection) url.openConnection();
