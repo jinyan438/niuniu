@@ -233,6 +233,9 @@
             if (target.closest('.tag-book-btn')) {
                 event.stopPropagation();
                 NR.openTagEditModal(bookName);
+            } else if (target.closest('.download-book-btn-on-shelf')) {
+                event.stopPropagation();
+                if (typeof NR.downloadOnlineBookFromShelf === 'function') NR.downloadOnlineBookFromShelf(bookName);
             } else if (target.closest('.delete-book-btn-on-shelf')) {
                 event.stopPropagation();
                 if (confirm('确定要从书架删除《' + bookName + '》吗？\n\n这将一并删除该书内容、阅读进度、AI数据库全部数据、人物图片和生图资源。此操作无法撤销。')) {

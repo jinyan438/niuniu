@@ -167,6 +167,15 @@
             bookEl.appendChild(detailsEl);
             var actionsEl = document.createElement('div');
             actionsEl.className = 'book-actions';
+            var downloadBtn = null;
+            if (book.onlineSource) {
+                downloadBtn = document.createElement('button');
+                downloadBtn.className = 'control-button download-book-btn-on-shelf';
+                downloadBtn.innerHTML = '<i class="fa-solid fa-download"></i>';
+                downloadBtn.dataset.bookName = book.name;
+                downloadBtn.title = book.downloadState === 'complete' ? '重新下载全部章节' : '下载全部章节';
+                bookEl.dataset.hasOnlineDownload = 'true';
+            }
             var tagBtn = document.createElement('button');
             tagBtn.className = 'control-button tag-book-btn';
             tagBtn.innerHTML = '🏷️';
@@ -178,6 +187,7 @@
             deleteBtn.dataset.bookName = book.name;
             deleteBtn.title = '从书架删除';
             actionsEl.appendChild(tagBtn);
+            if (downloadBtn) actionsEl.appendChild(downloadBtn);
             actionsEl.appendChild(deleteBtn);
             bookEl.appendChild(actionsEl);
             NR.els['bookshelf-grid'].appendChild(bookEl);

@@ -178,7 +178,8 @@ body.theme-eink::after {
 }
 
 .book-item .delete-book-btn-on-shelf,
-.book-item .tag-book-btn {
+.book-item .tag-book-btn,
+.book-item .download-book-btn-on-shelf {
     position: static;
     opacity: 1;
     width: 28px;
