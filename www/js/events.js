@@ -115,7 +115,7 @@
             var threshold = NR.state.viewportWidth * 0.3;
             if (Math.abs(NR.state.dragDelta) > 10) NR.state.ignoreNextClick = true;
             if (NR.state.dragDelta < -threshold) NR.jumpToPage(NR.state.currentPage + 1);
-            else if (NR.state.dragDelta > threshold && NR.state.currentPage > 1) NR.jumpToPage(NR.state.currentPage - 1);
+            else if (NR.state.dragDelta > threshold) NR.jumpToPage(NR.state.currentPage - 1);
             else NR.els['content-inner'].style.transform = 'translateX(' + NR.state.currentTranslate + 'px)';
             NR.state.dragDelta = 0;
         }
@@ -158,6 +158,29 @@
         
         NR.els['catalog-list'].addEventListener('click', function(event) {
             if (event.target.tagName !== 'LI') return;
+            var onlineSession = NR.bookSourceState && NR.bookSourceState.onlineReader;
+            if (onlineSession && event.target.dataset.chapterIndex !== undefined) {
+                var chapterIndex = Number(event.target.dataset.chapterIndex);
+                var chapterTitle = onlineSession.chapters[chapterIndex] && onlineSession.chapters[chapterIndex].title;
+                var targetPage = -1;
+                for (var onlinePageIndex = 0; onlinePageIndex < NR.state.allRenderedPages.length; onlinePageIndex++) {
+                    var titleNode = NR.state.allRenderedPages[onlinePageIndex].querySelector('p.chapter-title');
+                    if (!titleNode) {
+                        var firstMatchingParagraph = Array.from(NR.state.allRenderedPages[onlinePageIndex].querySelectorAll('p')).find(function(node) {
+                            return node.textContent.trim() === String(chapterTitle || '').trim();
+                        });
+                        titleNode = firstMatchingParagraph;
+                    }
+                    if (titleNode && titleNode.textContent.trim() === String(chapterTitle || '').trim()) {
+                        targetPage = onlinePageIndex + 1;
+                        break;
+                    }
+                }
+                NR.els['catalog-modal'].style.display = 'none';
+                if (targetPage !== -1) NR.jumpToPage(targetPage);
+                else if (typeof NR.openOnlineChapterAt === 'function') NR.openOnlineChapterAt(chapterIndex);
+                return;
+            }
             var pId = event.target.dataset.pId;
             var targetPage = -1;
             for (var i = 0; i < NR.state.allRenderedPages.length; i++) {

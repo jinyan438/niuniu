@@ -451,8 +451,9 @@
         });
     }
 
-    function buildOnlineSource(source, book, chapters, cachedChapters, status, nextIndex) {
-        return {
+    function buildOnlineSource(source, book, chapters, cachedChapters, status, nextIndex, sessionInfo) {
+        sessionInfo = sessionInfo || {};
+        var result = {
             sourceUrl: source.bookSourceUrl,
             sourceName: source.bookSourceName,
             bookUrl: book.bookUrl,
@@ -465,9 +466,12 @@
             chapters: snapshotOnlineChapters(chapters),
             cachedAt: Date.now()
         };
+        if (Number.isFinite(Number(sessionInfo.currentIndex))) result.currentIndex = Number(sessionInfo.currentIndex);
+        if (Array.isArray(sessionInfo.loadedIndexes)) result.loadedIndexes = sessionInfo.loadedIndexes.slice();
+        return result;
     }
 
-    function buildOnlineMetadata(source, book, chapters, fileName, cachedChapters, status, nextIndex) {
+    function buildOnlineMetadata(source, book, chapters, fileName, cachedChapters, status, nextIndex, sessionInfo) {
         return {
             name: fileName,
             cover: book.coverUrl || null,
@@ -476,7 +480,7 @@
             cachedChapterCount: cachedChapters,
             downloadState: status,
             tags: Array.from(new Set(['网络书源', source.bookSourceName].concat(String(book.kind || '').split(/[,/|，、\s]+/).filter(Boolean).slice(0, 5)))),
-            onlineSource: buildOnlineSource(source, book, chapters, cachedChapters, status, nextIndex)
+            onlineSource: buildOnlineSource(source, book, chapters, cachedChapters, status, nextIndex, sessionInfo)
         };
     }
 
@@ -522,6 +526,10 @@
     function createOnlineSession(source, book, chapters, fileName, parts, nextIndex) {
         var normalizedNext = Math.max(0, Math.min(chapters.length, Number(nextIndex) || 0));
         var cachedCount = chapters.slice(0, normalizedNext).filter(function(chapter) { return !chapter.isVolume; }).length;
+        var loadedIndexes = new Set();
+        chapters.slice(0, normalizedNext).forEach(function(chapter, index) {
+            if (!chapter.isVolume) loadedIndexes.add(index);
+        });
         return {
             source: source,
             book: book,
@@ -530,6 +538,8 @@
             parts: parts || [],
             nextIndex: normalizedNext,
             cachedCount: cachedCount,
+            currentIndex: Math.max(0, normalizedNext - 1),
+            loadedIndexes: loadedIndexes,
             loadingPromise: null,
             controller: null
         };
@@ -539,7 +549,10 @@
         var text = session.parts.join('\n\n').trim();
         var complete = session.nextIndex >= session.chapters.length;
         var actualStatus = complete ? 'complete' : (status || 'downloading');
-        var metadata = buildOnlineMetadata(session.source, session.book, session.chapters, session.fileName, session.cachedCount, actualStatus, session.nextIndex);
+        var metadata = buildOnlineMetadata(session.source, session.book, session.chapters, session.fileName, session.cachedCount, actualStatus, session.nextIndex, {
+            currentIndex: session.currentIndex,
+            loadedIndexes: Array.from(session.loadedIndexes || [])
+        });
         await NR.storageDB.saveBook({ id: session.fileName, content: text, onlineSource: metadata.onlineSource });
         saveShelfMetadata(metadata);
         if (refreshReader) await refreshOpenReader(session.fileName, text);
@@ -581,6 +594,7 @@
                     failed = true;
                     appended.push(formatChapter(chapter, '[本章加载失败：' + (error.message || error) + ']'));
                 }
+                if (session.loadedIndexes) session.loadedIndexes.add(session.nextIndex - 1);
                 break;
             }
             session.parts.push.apply(session.parts, appended);
@@ -604,6 +618,53 @@
     NR.canLoadNextOnlineChapter = function() {
         var session = state.onlineReader;
         return !!(session && session.nextIndex < session.chapters.length);
+    };
+
+    // Open an arbitrary chapter selected from the complete online TOC.  Only
+    // that chapter is requested; we do not walk all chapters between the
+    // current position and the selected one.
+    NR.openOnlineChapterAt = function(index) {
+        var session = state.onlineReader;
+        index = Number(index);
+        if (!session || !Number.isInteger(index) || index < 0 || index >= session.chapters.length) return Promise.resolve(false);
+        if (session.loadingPromise) return session.loadingPromise;
+        var chapter = session.chapters[index];
+        showOnlineReaderStatus('正在加载第 ' + (index + 1) + ' 章…');
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        session.controller = controller;
+        state.downloadController = controller;
+        session.loadingPromise = (async function() {
+            var content = '';
+            var failed = false;
+            if (!chapter.isVolume) {
+                try {
+                    content = await engine.chapterContent(session.source, session.book, chapter);
+                } catch (error) {
+                    failed = true;
+                    content = '[本章加载失败：' + (error.message || error) + ']';
+                }
+            }
+            session.parts = [formatChapter(chapter, content)];
+            session.currentIndex = index;
+            session.nextIndex = Math.min(session.chapters.length, index + 1);
+            if (session.loadedIndexes && !chapter.isVolume) session.loadedIndexes.add(index);
+            session.cachedCount = session.loadedIndexes ? session.loadedIndexes.size : (chapter.isVolume ? 0 : 1);
+            var text = await persistOnlineSession(session, failed ? 'partial' : 'downloading', false);
+            if (NR.state.currentFileName === session.fileName && NR.els.readerView && NR.els.readerView.style.display !== 'none') {
+                await NR.loadBook(session.fileName, text, { startPage: 1 });
+            }
+            showOnlineReaderStatus(failed ? '本章加载失败，已显示错误提示' : '已跳转到第 ' + (index + 1) + ' 章', failed);
+            return !failed;
+        })().catch(function(error) {
+            console.error('[BookSource] 跳转章节加载失败:', error);
+            showOnlineReaderStatus('章节加载失败：' + (error.message || error), true);
+            return false;
+        }).finally(function() {
+            session.loadingPromise = null;
+            session.controller = null;
+            if (state.downloadController === controller) state.downloadController = null;
+        });
+        return session.loadingPromise;
     };
 
     // Rebuild an online-reader session when a partially cached book is opened
@@ -630,6 +691,11 @@
         var nextIndex = Number(online.nextIndex);
         if (!Number.isFinite(nextIndex)) nextIndex = Number(online.cachedChapters) || 0;
         state.onlineReader = createOnlineSession(source, book, online.chapters, bookMeta.name, [content || ''], nextIndex);
+        state.onlineReader.currentIndex = Number.isFinite(Number(online.currentIndex)) ? Number(online.currentIndex) : Math.max(0, nextIndex - 1);
+        if (Array.isArray(online.loadedIndexes)) {
+            state.onlineReader.loadedIndexes = new Set(online.loadedIndexes.map(function(value) { return Number(value); }).filter(function(value) { return Number.isInteger(value) && value >= 0; }));
+            state.onlineReader.cachedCount = state.onlineReader.loadedIndexes.size;
+        }
         return true;
     };
 
@@ -653,7 +719,10 @@
             initialParts.push(formatChapter(firstChapter, firstContent));
             var initialText = initialParts.join('\n\n').trim();
             var session = createOnlineSession(source, book, chapters, fileName, initialParts.slice(), firstIndex + 1);
-            var initialMetadata = buildOnlineMetadata(source, book, chapters, fileName, session.cachedCount, session.nextIndex >= chapters.length ? 'complete' : 'downloading', session.nextIndex);
+            var initialMetadata = buildOnlineMetadata(source, book, chapters, fileName, session.cachedCount, session.nextIndex >= chapters.length ? 'complete' : 'downloading', session.nextIndex, {
+                currentIndex: session.currentIndex,
+                loadedIndexes: Array.from(session.loadedIndexes)
+            });
             await NR.storageDB.saveBook({
                 id: fileName,
                 content: initialText,
@@ -663,12 +732,12 @@
             el['source-download-modal'].style.display = 'none';
             NR.state.activeSubView = 'original';
             NR.state.currentBookCoverUrl = book.coverUrl || null;
+            state.onlineReader = session;
             NR.showReaderView();
             await NR.loadBook(fileName, initialText);
             // The first chapter is the only request made before the reader is
             // shown.  Remaining chapters are fetched by loadNextOnlineChapter
             // when the user turns past the cached end.
-            state.onlineReader = session;
             state.backgroundDownload = null;
             state.downloadController = null;
         } catch (error) {

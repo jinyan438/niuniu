@@ -197,12 +197,21 @@
 
     NR.populateCatalog = function() {
         NR.els['catalog-list'].innerHTML = '';
-        if (NR.state.chapters.length > 0) {
+        var onlineSession = NR.bookSourceState && NR.bookSourceState.onlineReader;
+        var catalogChapters = onlineSession && onlineSession.chapters && onlineSession.chapters.length
+            ? onlineSession.chapters
+            : NR.state.chapters;
+        if (catalogChapters.length > 0) {
             NR.els['btn-catalog'].style.display = 'inline-block';
-            NR.state.chapters.forEach(function(chap) {
+            catalogChapters.forEach(function(chap, index) {
                 var li = document.createElement('li');
                 li.textContent = chap.title;
-                li.dataset.pId = chap.p_id;
+                if (onlineSession) {
+                    li.dataset.chapterIndex = String(index);
+                    if (onlineSession.loadedIndexes && onlineSession.loadedIndexes.has(index)) li.classList.add('online-cached');
+                } else {
+                    li.dataset.pId = chap.p_id;
+                }
                 NR.els['catalog-list'].appendChild(li);
             });
         } else {

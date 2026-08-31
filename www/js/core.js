@@ -182,6 +182,12 @@
             }
             return;
         }
+        if (page < 1 && page === NR.state.currentPage - 1 && NR.state.currentPage === 1 &&
+            NR.bookSourceState && NR.bookSourceState.onlineReader &&
+            NR.bookSourceState.onlineReader.currentIndex > 0 &&
+            typeof NR.openOnlineChapterAt === 'function') {
+            return NR.openOnlineChapterAt(NR.bookSourceState.onlineReader.currentIndex - 1);
+        }
         if (page < 1 || page === NR.state.currentPage || NR.state.isTransitioning) return;
 
         if (NR.state.settings.enableFocusMode) {
