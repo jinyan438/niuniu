@@ -508,6 +508,12 @@
                 if (root.NiuniuBookSource && typeof root.NiuniuBookSource.getCookie === 'function') return root.NiuniuBookSource.getCookie(asString(url));
                 return self.cookies.get(asString(url)) || '';
             },
+            getKey: function(url, key) {
+                var value = asString(this.getCookie(url));
+                var pattern = new RegExp('(?:^|;\\s*)' + asString(key).replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '=([^;]*)');
+                var match = value.match(pattern);
+                return match ? match[1] : '';
+            },
             setCookie: function(url, value) {
                 if (root.NiuniuBookSource && typeof root.NiuniuBookSource.setCookie === 'function') return root.NiuniuBookSource.setCookie(asString(url), asString(value));
                 self.cookies.set(asString(url), asString(value));
@@ -574,6 +580,8 @@
             post: function(url, body, headers) {
                 return responseWrapper(self.transport.requestSync({ url: resolveUrl(url, context.baseUrl || sourceData.bookSourceUrl), method: 'POST', body: asString(body), headers: parseHeaders(headers) }));
             },
+            getCookie: function(url) { return cookie.getCookie(url); },
+            getWebViewUA: function() { return DEFAULT_UA; },
             toast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
             longToast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
             startBrowser: function(url) {
@@ -622,24 +630,43 @@
     BookSourceEngine.prototype.libraryRunner = function(library, names) {
         var key = names.join('|') + '\n' + library;
         if (this.libraryRunners.has(key)) return this.libraryRunners.get(key);
-        var body = asString(library) + '\n;return eval(__ruleCode);';
+        var functionNames = this.libraryFunctionNames(library);
+        var expose = functionNames.map(function(name) {
+            return 'try { this[' + JSON.stringify(name) + '] = ' + name + '; } catch (__exposeError) {}';
+        }).join('\n');
+        var body = asString(library) + '\n' + expose + '\n;return eval(__ruleCode);';
         var runner = Function.apply(null, names.concat('__ruleCode', body));
         this.libraryRunners.set(key, runner);
         return runner;
     };
 
-    BookSourceEngine.prototype.withRuntimeGlobals = function(bindings, action) {
+    BookSourceEngine.prototype.libraryFunctionNames = function(library) {
+        var names = [];
+        var seen = new Set();
+        var match;
+        var pattern = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g;
+        while ((match = pattern.exec(asString(library)))) {
+            if (!seen.has(match[1])) {
+                seen.add(match[1]);
+                names.push(match[1]);
+            }
+        }
+        return names;
+    };
+
+    BookSourceEngine.prototype.withRuntimeGlobals = function(bindings, action, extraNames) {
         var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
+        var names = runtimeNames.concat(extraNames || []).filter(function(name, index, all) { return all.indexOf(name) === index; });
         var previous = {};
         var existed = {};
-        runtimeNames.forEach(function(name) {
+        names.forEach(function(name) {
             existed[name] = Object.prototype.hasOwnProperty.call(root, name);
             previous[name] = root[name];
-            root[name] = bindings[name];
+            if (runtimeNames.indexOf(name) >= 0) root[name] = bindings[name];
         });
         try { return action(); }
         finally {
-            runtimeNames.forEach(function(name) {
+            names.forEach(function(name) {
                 if (existed[name]) root[name] = previous[name];
                 else {
                     try { delete root[name]; } catch (e) { root[name] = undefined; }
@@ -658,16 +685,20 @@
         var names = Object.keys(b);
         var values = names.map(function(name) { return b[name]; });
         var library = context.source && context.source.jsLib || '';
+        var libraryNames = this.libraryFunctionNames(library);
         var self = this;
         try {
             return this.withRuntimeGlobals(b, function() {
                 return self.libraryRunner(library, names).apply(root, values.concat(script));
-            });
+            }, libraryNames);
         } catch (firstError) {
             try {
                 return this.withRuntimeGlobals(b, function() {
-                    return Function.apply(null, names.concat(asString(library) + '\n' + script)).apply(root, values);
-                });
+                    var expose = libraryNames.map(function(name) {
+                        return 'try { this[' + JSON.stringify(name) + '] = ' + name + '; } catch (__exposeError) {}';
+                    }).join('\n');
+                    return Function.apply(null, names.concat(asString(library) + '\n' + expose + '\n' + script)).apply(root, values);
+                }, libraryNames);
             } catch (secondError) {
                 throw new Error('JS 规则执行失败: ' + secondError.message);
             }

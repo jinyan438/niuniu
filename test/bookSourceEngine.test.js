@@ -157,6 +157,34 @@ test('loads jsLib in the same scope as declarative JavaScript rules', () => {
     ]);
 });
 
+test('exposes jsLib helpers on this while a rule executes', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({
+        bookSourceUrl: 'https://library-helper.test',
+        bookSourceName: 'Library Helper Test',
+        jsLib: `
+            function createSvg(value) { return 'svg:' + value; }
+            function render() { return this.createSvg.bind(this)('ok'); }
+        `,
+        exploreUrl: '<js>JSON.stringify([{title:"辅助",url:render()}])</js>'
+    });
+
+    assert.deepEqual(engine.parseExploreKinds(source), [
+        { type: 'url', title: '辅助', url: 'svg:ok' }
+    ]);
+});
+
+test('supports Legado cookie key lookups used by content rules', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://cookie.test', bookSourceName: 'Cookie Test' });
+    const context = { source, result: '', src: '', baseUrl: source.bookSourceUrl };
+    const bindings = engine.scriptBindings(context);
+
+    bindings.cookie.setCookie(source.bookSourceUrl, 'qttoken=abc123; device=android');
+    assert.equal(bindings.cookie.getKey(source.bookSourceUrl, 'qttoken'), 'abc123');
+    assert.equal(bindings.cookie.getKey(source.bookSourceUrl, 'device'), 'android');
+});
+
 test('interpolates multiple Legado field rules inside a text template', () => {
     const engine = new BookSourceEngine();
     const source = normalizeSource({ bookSourceUrl: 'https://template.test', bookSourceName: 'Template Test' });
