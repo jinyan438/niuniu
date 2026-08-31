@@ -123,6 +123,14 @@
             return e.type.startsWith('touch') ? e.touches[0].pageY : e.pageY;
         }
         function shelfDragStart(e) {
+            // Action buttons must never start the bookshelf drag/selection
+            // gesture; otherwise a tap can select the whole row and swallow
+            // the subsequent button click on Android WebView.
+            if (e.target && e.target.closest && e.target.closest('.book-actions')) {
+                NR.state.isShelfDragging = false;
+                NR.state.ignoreNextClick = false;
+                return;
+            }
             if (e.button !== 0 && e.type.startsWith('mouse')) return;
             var scrollbarWidth = NR.els['bookshelf-grid'].offsetWidth - NR.els['bookshelf-grid'].clientWidth;
             if (e.offsetX > NR.els['bookshelf-grid'].clientWidth - scrollbarWidth) return;
@@ -218,13 +226,15 @@
         });
 
         NR.els['bookshelf-grid'].addEventListener('click', function(event) {
+            var target = event.target;
+            var actionButton = target && target.closest ? target.closest('.book-actions button') : null;
+            if (actionButton) NR.state.ignoreNextClick = false;
             if (NR.state.ignoreNextClick) {
                 event.preventDefault();
                 event.stopPropagation();
                 NR.state.ignoreNextClick = false;
                 return;
             }
-            var target = event.target;
             var bookItem = target.closest('.book-item');
             if (!bookItem) return;
 

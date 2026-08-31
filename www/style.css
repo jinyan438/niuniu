@@ -175,6 +175,9 @@ body.theme-eink::after {
     gap: 10px;
     justify-content: flex-start;
     padding-top: 5px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
 }
 
 .book-item .delete-book-btn-on-shelf,
