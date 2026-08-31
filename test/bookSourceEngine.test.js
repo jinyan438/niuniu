@@ -94,7 +94,7 @@ test('runs a declarative source from search through chapter content', async () =
         bookSourceUrl: 'https://books.test',
         bookSourceName: 'Test',
         searchUrl: '/search?q=searchKey&page={{page}}',
-        ruleSearch: { bookList: '$.data[*]', name: '$.title', author: '$.author', bookUrl: '$.url', coverUrl: '$.cover' },
+        ruleSearch: { bookList: '$.data', name: '$.title', author: '$.author', bookUrl: '$.url', coverUrl: '$.cover' },
         ruleBookInfo: { name: '$.title', author: '$.author', intro: '$.intro', tocUrl: '$.toc' },
         ruleToc: { chapterList: '$.chapters[*]', chapterName: '$.title', chapterUrl: '$.url' },
         ruleContent: { content: '$.content' }
@@ -138,4 +138,65 @@ test('imports and executes a pure JavaScript book source', async () => {
     const chapters = await engine.toc(source, info);
     assert.equal(chapters[0].url, 'https://js.test/c/1');
     assert.equal(await engine.chapterContent(source, info, chapters[0]), 'JS 正文');
+});
+
+test('loads jsLib in the same scope as declarative JavaScript rules', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({
+        bookSourceUrl: 'https://library.test',
+        bookSourceName: 'Library Test',
+        jsLib: `
+            var host = ['https://one.test', 'https://two.test'];
+            function selectedHost() { return this.source.getVariable() || host[0]; }
+        `,
+        exploreUrl: '<js>JSON.stringify([{title:"线路",url:selectedHost()}])</js>'
+    });
+
+    assert.deepEqual(engine.parseExploreKinds(source), [
+        { type: 'url', title: '线路', url: 'https://one.test' }
+    ]);
+});
+
+test('interpolates multiple Legado field rules inside a text template', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://template.test', bookSourceName: 'Template Test' });
+    const item = { status: '连载', score: '9.4', tags: '玄幻' };
+
+    assert.equal(
+        engine.extractString(item, '{{$.status}},{{$.score}},{{$.tags}}', { source, result: item, src: item }, false),
+        '连载,9.4,玄幻'
+    );
+});
+
+test('executes JavaScript request URLs before expanding Legado placeholders', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://request.test', bookSourceName: 'Request Test' });
+    const request = engine.prepareRequest(
+        '<js>`https://request.test/search?key=${key}&page={{page}}`</js>',
+        { source, key: '斗破苍穹', page: 2 }
+    );
+
+    assert.equal(request.url, 'https://request.test/search?key=%E6%96%97%E7%A0%B4%E8%8B%8D%E7%A9%B9&page=2');
+});
+
+test('does not split JavaScript logical OR as a Legado fallback rule', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://js-rule.test', bookSourceName: 'JS Rule Test' });
+    const item = { name: '备用书名' };
+
+    assert.equal(
+        engine.extractString(item, '<js>let name = result.missing || result.name; name;</js>', { source, result: item, src: item }, false),
+        '备用书名'
+    );
+});
+
+test('applies a trailing data rule after a JavaScript rule block', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://chain.test', bookSourceName: 'Chain Test' });
+    const value = { data: [{ name: 'A' }, { name: 'B' }] };
+
+    assert.deepEqual(
+        engine.extract(value, '<js>JSON.stringify(result)</js>$.data', { source, result: value, src: value }, true),
+        [{ name: 'A' }, { name: 'B' }]
+    );
 });

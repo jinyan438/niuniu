@@ -20,6 +20,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
+import java.net.HttpCookie;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.URL;
@@ -70,6 +71,57 @@ public class MainActivity extends BridgeActivity {
 
     public static class BookSourceHttpBridge {
         private final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+
+        @JavascriptInterface
+        public String getCookie(String url) {
+            try {
+                URI uri = cookieUri(url);
+                Map<String, List<String>> headers = cookieManager.get(uri, Collections.emptyMap());
+                StringBuilder value = new StringBuilder();
+                for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+                    if (!"cookie".equalsIgnoreCase(entry.getKey())) continue;
+                    for (String item : entry.getValue()) {
+                        if (item == null || item.isEmpty()) continue;
+                        if (value.length() > 0) value.append("; ");
+                        value.append(item);
+                    }
+                }
+                return value.toString();
+            } catch (Exception ignored) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean setCookie(String url, String value) {
+            try {
+                cookieManager.put(cookieUri(url), Collections.singletonMap("Set-Cookie", Collections.singletonList(value == null ? "" : value)));
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean removeCookie(String url) {
+            try {
+                URI uri = cookieUri(url);
+                boolean removed = false;
+                for (HttpCookie item : cookieManager.getCookieStore().get(uri)) {
+                    removed = cookieManager.getCookieStore().remove(uri, item) || removed;
+                }
+                return removed;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private static URI cookieUri(String value) throws Exception {
+            String target = value == null ? "" : value.trim();
+            if (target.isEmpty()) throw new IllegalArgumentException("Cookie 地址为空");
+            if (!target.matches("^[A-Za-z][A-Za-z0-9+.-]*://.*$")) target = "https://" + target;
+            return new URI(target);
+        }
 
         @JavascriptInterface
         public String request(String requestJson) {

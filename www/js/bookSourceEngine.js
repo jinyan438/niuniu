@@ -56,6 +56,13 @@
         return new TextDecoder('utf-8').decode(bytes);
     }
 
+    function decodeInlineDataUrl(value) {
+        var url = asString(value).trim();
+        if (!/^data:;base64,/i.test(url)) return null;
+        var payload = url.slice(url.indexOf(',') + 1).split(',')[0].trim();
+        try { return decodeBase64(payload); } catch (e) { return ''; }
+    }
+
     function parseRuleObject(value) {
         if (!value) return {};
         if (typeof value === 'object') return value;
@@ -256,6 +263,8 @@
     function NativeTransport() {}
 
     NativeTransport.prototype.request = async function(options) {
+        var inlineBody = decodeInlineDataUrl(options.url);
+        if (inlineBody !== null) return { status: 200, url: options.url, headers: {}, body: inlineBody };
         if (root.NiuniuBookSource && typeof root.NiuniuBookSource.request === 'function') {
             var nativeResult = root.NiuniuBookSource.request(JSON.stringify(options));
             var parsedNative = typeof nativeResult === 'string' ? JSON.parse(nativeResult) : nativeResult;
@@ -301,6 +310,8 @@
     };
 
     NativeTransport.prototype.requestSync = function(options) {
+        var inlineBody = decodeInlineDataUrl(options.url);
+        if (inlineBody !== null) return { status: 200, url: options.url, headers: {}, body: inlineBody };
         if (!root.NiuniuBookSource || typeof root.NiuniuBookSource.request !== 'function') {
             throw new Error('此书源脚本需要 Android 原生网络环境');
         }
@@ -476,6 +487,8 @@
         options = options || {};
         this.transport = options.transport || new NativeTransport();
         this.variables = new Map();
+        this.libraryRunners = new Map();
+        this.cookies = new Map();
         this.maxTocPages = options.maxTocPages || 30;
         this.maxContentPages = options.maxContentPages || 12;
     }
@@ -490,13 +503,40 @@
         var self = this;
         var sourceData = context.source || {};
         var variables = this.variableMap(sourceData);
+        var cookie = {
+            getCookie: function(url) {
+                if (root.NiuniuBookSource && typeof root.NiuniuBookSource.getCookie === 'function') return root.NiuniuBookSource.getCookie(asString(url));
+                return self.cookies.get(asString(url)) || '';
+            },
+            setCookie: function(url, value) {
+                if (root.NiuniuBookSource && typeof root.NiuniuBookSource.setCookie === 'function') return root.NiuniuBookSource.setCookie(asString(url), asString(value));
+                self.cookies.set(asString(url), asString(value));
+                return value;
+            },
+            removeCookie: function(url) {
+                if (root.NiuniuBookSource && typeof root.NiuniuBookSource.removeCookie === 'function') return root.NiuniuBookSource.removeCookie(asString(url));
+                self.cookies.delete(asString(url));
+            }
+        };
         var source = Object.assign({}, sourceData, {
             get: function(key) { return variables.get(String(key)); },
             put: function(key, value) { variables.set(String(key), value); return value; },
             getVariable: function() { return variables.get('__source_variable') || ''; },
             setVariable: function(value) { variables.set('__source_variable', value); },
+            getLoginInfo: function() { return variables.get('__login_info') || ''; },
+            putLoginInfo: function(value) { variables.set('__login_info', value); return value; },
+            getLoginInfoMap: function() {
+                var value = variables.get('__login_info');
+                if (!value) return {};
+                if (typeof value === 'object') return value;
+                try { return parseLooseJson(value); } catch (e) { return {}; }
+            },
             getLoginHeader: function() { return variables.get('__login_header') || ''; },
-            putLoginHeader: function(value) { variables.set('__login_header', value); return value; }
+            putLoginHeader: function(value) { variables.set('__login_header', value); return value; },
+            getHeaderMap: function() { return parseHeaders(sourceData.header); },
+            getKey: function() { return sourceData.bookSourceUrl || ''; },
+            getFromMemory: function(key) { return variables.get('__memory_' + String(key)); },
+            putMemory: function(key, value) { variables.set('__memory_' + String(key), value); return value; }
         });
         function decorate(data) {
             data = data || {};
@@ -507,8 +547,15 @@
                 getUrl: function() { return data.url || ''; },
                 getTitle: function() { return data.title || ''; },
                 getIndex: function() { return data.index || 0; },
-                getVariable: function() { return data.variable || ''; }
+                getVariable: function() { return data.variable || ''; },
+                setUseReplaceRule: function(value) {
+                    data.readConfig = data.readConfig || {};
+                    data.readConfig.useReplaceRule = !!value;
+                }
             });
+        }
+        function JavaImporter() {
+            this.importClass = function() { return this; };
         }
         var java = {
             get: function(key) { return variables.get(String(key)); },
@@ -527,8 +574,21 @@
             post: function(url, body, headers) {
                 return responseWrapper(self.transport.requestSync({ url: resolveUrl(url, context.baseUrl || sourceData.bookSourceUrl), method: 'POST', body: asString(body), headers: parseHeaders(headers) }));
             },
+            toast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
+            longToast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
+            startBrowser: function(url) {
+                if (root.open) root.open(asString(url), '_blank');
+                return '';
+            },
             base64Encode: function(value) { return typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(asString(value)))) : Buffer.from(asString(value)).toString('base64'); },
             base64Decode: decodeBase64,
+            hexDecodeToString: function(value) {
+                var text = asString(value).trim();
+                if (!/^(?:[0-9a-f]{2})+$/i.test(text)) return text;
+                var encoded = '';
+                for (var i = 0; i < text.length; i += 2) encoded += '%' + text.slice(i, i + 2);
+                try { return decodeURIComponent(encoded); } catch (e) { return text; }
+            },
             md5Encode: function(value) {
                 if (root.NiuniuBookSource && typeof root.NiuniuBookSource.md5 === 'function') return root.NiuniuBookSource.md5(asString(value));
                 throw new Error('MD5 规则需要 Android 原生环境');
@@ -548,9 +608,44 @@
             searchKey: context.key || '',
             java: java,
             source: source,
+            sourceApi: source,
+            cookie: cookie,
+            cache: source,
+            Packages: {},
+            JavaImporter: JavaImporter,
+            infoMap: context.infoMap || {},
             book: decorate(context.book),
             chapter: decorate(context.chapter)
         };
+    };
+
+    BookSourceEngine.prototype.libraryRunner = function(library, names) {
+        var key = names.join('|') + '\n' + library;
+        if (this.libraryRunners.has(key)) return this.libraryRunners.get(key);
+        var body = asString(library) + '\n;return eval(__ruleCode);';
+        var runner = Function.apply(null, names.concat('__ruleCode', body));
+        this.libraryRunners.set(key, runner);
+        return runner;
+    };
+
+    BookSourceEngine.prototype.withRuntimeGlobals = function(bindings, action) {
+        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
+        var previous = {};
+        var existed = {};
+        runtimeNames.forEach(function(name) {
+            existed[name] = Object.prototype.hasOwnProperty.call(root, name);
+            previous[name] = root[name];
+            root[name] = bindings[name];
+        });
+        try { return action(); }
+        finally {
+            runtimeNames.forEach(function(name) {
+                if (existed[name]) root[name] = previous[name];
+                else {
+                    try { delete root[name]; } catch (e) { root[name] = undefined; }
+                }
+            });
+        }
     };
 
     BookSourceEngine.prototype.evalJs = function(code, context) {
@@ -562,11 +657,17 @@
         var b = this.scriptBindings(context);
         var names = Object.keys(b);
         var values = names.map(function(name) { return b[name]; });
+        var library = context.source && context.source.jsLib || '';
+        var self = this;
         try {
-            return Function.apply(null, names.concat('"use strict";return eval(' + JSON.stringify(script) + ');')).apply(null, values);
+            return this.withRuntimeGlobals(b, function() {
+                return self.libraryRunner(library, names).apply(root, values.concat(script));
+            });
         } catch (firstError) {
             try {
-                return Function.apply(null, names.concat('"use strict";' + script)).apply(null, values);
+                return this.withRuntimeGlobals(b, function() {
+                    return Function.apply(null, names.concat(asString(library) + '\n' + script)).apply(root, values);
+                });
             } catch (secondError) {
                 throw new Error('JS 规则执行失败: ' + secondError.message);
             }
@@ -645,8 +746,10 @@
 
     BookSourceEngine.prototype.prepareRequest = function(ruleUrl, context) {
         context = Object.assign({}, context || {});
-        var expanded = this.interpolate(ruleUrl, context);
-        if (/^@js:|^<js>/i.test(expanded)) expanded = asString(this.evalJs(expanded, context));
+        var rawRuleUrl = asString(ruleUrl).trim();
+        var expanded = /^@js:|^<js>/i.test(rawRuleUrl)
+            ? this.interpolate(asString(this.evalJs(rawRuleUrl, context)), context)
+            : this.interpolate(rawRuleUrl, context);
         var parsed = splitUrlOption(expanded);
         var option = parsed.option || {};
         var source = context.source || {};
@@ -700,7 +803,10 @@
     BookSourceEngine.prototype.extractBasic = function(value, rule, listMode) {
         var text = asString(rule).trim();
         if (!text) return listMode ? (Array.isArray(value) ? value : [value]) : value;
-        if (/^@Json:|^\$/i.test(text)) return jsonPath(typeof value === 'string' ? this.parseBody(value) : value, text);
+        if (/^@Json:|^\$/i.test(text)) {
+            var jsonValues = jsonPath(typeof value === 'string' ? this.parseBody(value) : value, text);
+            return listMode && jsonValues.length === 1 && Array.isArray(jsonValues[0]) ? jsonValues[0] : jsonValues;
+        }
         if (/^@XPath:|^\/\//i.test(text)) return xpathExtract(value, text);
         if (/^@Regex:|^:/i.test(text)) return regexExtract(value, text);
         if (value && typeof value === 'object' && !value.nodeType && !value.querySelectorAll && Object.prototype.hasOwnProperty.call(value, text)) return [value[text]];
@@ -714,6 +820,20 @@
 
         var getMatch = text.match(/^@get:\{([^}]+)\}$/i);
         if (getMatch) return this.variableMap(context.source || {}).get(getMatch[1]) || '';
+
+        var chainedJs = text.match(/^<js>([\s\S]*?)<\/js>([\s\S]*)$/i);
+        if (chainedJs) {
+            var jsValue = this.evalJs('<js>' + chainedJs[1] + '</js>', Object.assign({}, context, { result: value, src: value }));
+            var trailingRule = chainedJs[2].trim();
+            return trailingRule
+                ? this.extract(jsValue, trailingRule, Object.assign({}, context, { result: jsValue, src: jsValue }), listMode)
+                : jsValue;
+        }
+        if (/^@js:/i.test(text)) return this.evalJs(text, Object.assign({}, context, { result: value, src: value }));
+
+        if (!listMode && /\{\{[\s\S]*?\}\}/.test(text)) {
+            return this.interpolate(text, Object.assign({}, context, { result: value, src: value }));
+        }
 
         var alternatives = splitOutside(text, '||');
         if (alternatives.length > 1) {
@@ -736,8 +856,6 @@
                 return all.concat(Array.isArray(parsed) ? parsed : [parsed]);
             }.bind(this), []);
         }
-
-        if (/^@js:|^<js>/i.test(text)) return this.evalJs(text, Object.assign({}, context, { result: value, src: value }));
 
         var jsIndex = text.search(/@js:|<js>/i);
         var mainRule = jsIndex >= 0 ? text.slice(0, jsIndex) : text;
