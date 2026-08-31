@@ -233,6 +233,35 @@ test('uses the asynchronous native transport when available', async () => {
     }
 });
 
+test('reports each chapter as soon as background downloading completes', async () => {
+    const source = normalizeSource({ bookSourceUrl: 'https://progress.test', bookSourceName: 'Progress Test' });
+    const engine = new BookSourceEngine({
+        transport: {
+            async request() { return { status: 200, url: 'https://progress.test', headers: {}, body: '' }; }
+        }
+    });
+    engine.chapterContent = async function(_, __, chapter) {
+        await new Promise((resolve) => setTimeout(resolve, chapter.index === 0 ? 5 : 1));
+        return '正文 ' + chapter.index;
+    };
+    const events = [];
+    const chapters = [
+        { index: 0, title: '第一章' },
+        { index: 1, title: '第二章' },
+        { index: 2, title: '第三章' }
+    ];
+    const content = await engine.downloadBook(source, {}, chapters, {
+        concurrency: 2,
+        onChapter(index, text, chapter, completed, total) {
+            events.push({ index, text, title: chapter.title, completed, total });
+        }
+    });
+    assert.match(content, /第一章\n\n正文 0/);
+    assert.equal(events.length, 3);
+    assert.equal(events[2].total, 3);
+    assert.deepEqual(new Set(events.map((event) => event.index)), new Set([0, 1, 2]));
+});
+
 test('interpolates multiple Legado field rules inside a text template', () => {
     const engine = new BookSourceEngine();
     const source = normalizeSource({ bookSourceUrl: 'https://template.test', bookSourceName: 'Template Test' });

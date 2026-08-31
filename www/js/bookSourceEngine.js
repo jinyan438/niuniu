@@ -1160,13 +1160,19 @@
                 if (options.signal && options.signal.aborted) throw new Error('下载已取消');
                 var index = cursor++;
                 var chapter = chapters[index];
-                if (chapter.isVolume) {
-                    results[index] = chapter.title;
-                } else {
-                    var content = await self.chapterContent(source, book, chapter);
-                    results[index] = chapter.title + '\n\n' + (content || '[本章暂无可用正文]');
+                try {
+                    if (chapter.isVolume) {
+                        results[index] = chapter.title;
+                    } else {
+                        var content = await self.chapterContent(source, book, chapter);
+                        results[index] = chapter.title + '\n\n' + (content || '[本章暂无可用正文]');
+                    }
+                } catch (error) {
+                    if (!options.continueOnError) throw error;
+                    results[index] = chapter.title + '\n\n[本章加载失败：' + (error.message || error) + ']';
                 }
                 completed++;
+                if (options.onChapter) options.onChapter(index, results[index], chapter, completed, chapters.length);
                 if (options.onProgress) options.onProgress(completed, chapters.length, chapter.title);
             }
         }

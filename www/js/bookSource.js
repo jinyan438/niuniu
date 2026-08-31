@@ -15,7 +15,8 @@
         searchBusy: false,
         selectedFiles: [],
         currentDetail: null,
-        downloadController: null
+        downloadController: null,
+        backgroundDownload: null
     };
     var engine = new NR.BookSourceEngine();
     var el = {};
@@ -425,7 +426,154 @@
         return cleanName + (cleanAuthor ? ' - ' + cleanAuthor : '') + '.txt';
     }
 
+    function formatChapter(chapter, content) {
+        if (chapter.isVolume) return chapter.title;
+        return chapter.title + '\n\n' + (content || '[本章暂无可用正文]');
+    }
+
+    function buildOnlineSource(source, book, totalChapters, cachedChapters, status) {
+        return {
+            sourceUrl: source.bookSourceUrl,
+            sourceName: source.bookSourceName,
+            bookUrl: book.bookUrl,
+            tocUrl: book.tocUrl,
+            totalChapters: totalChapters,
+            cachedChapters: cachedChapters,
+            downloadState: status,
+            cachedAt: Date.now()
+        };
+    }
+
+    function buildOnlineMetadata(source, book, chapters, fileName, cachedChapters, status) {
+        return {
+            name: fileName,
+            cover: book.coverUrl || null,
+            author: book.author || '未知',
+            chapterCount: chapters.filter(function(chapter) { return !chapter.isVolume; }).length,
+            cachedChapterCount: cachedChapters,
+            downloadState: status,
+            tags: Array.from(new Set(['网络书源', source.bookSourceName].concat(String(book.kind || '').split(/[,/|，、\s]+/).filter(Boolean).slice(0, 5)))),
+            onlineSource: buildOnlineSource(source, book, chapters.length, cachedChapters, status)
+        };
+    }
+
+    function saveShelfMetadata(metadata) {
+        var index = NR.state.bookshelf.findIndex(function(item) { return item.name === metadata.name; });
+        if (index >= 0) NR.state.bookshelf[index] = metadata;
+        else NR.state.bookshelf.push(metadata);
+        NR.saveBookshelf();
+    }
+
+    function refreshOpenReader(fileName, content) {
+        if (NR.state.currentFileName !== fileName || !NR.els.readerView || NR.els.readerView.style.display === 'none') return Promise.resolve();
+        var targetPage = NR.state.currentPage || 1;
+        NR.state.currentFileContent = content;
+        NR.prepareContent(content);
+        return NR.paginate().then(function() {
+            NR.state.currentPage = Math.max(1, Math.min(targetPage, NR.state.totalPages || 1));
+            NR.updateDOMPages();
+            NR.updateUI();
+        });
+    }
+
+    async function cacheCurrentBookLazy() {
+        if (!state.currentDetail || !state.currentDetail.chapters.length) return;
+        var source = state.currentDetail.source;
+        var book = state.currentDetail.book;
+        var chapters = state.currentDetail.chapters;
+        var fileName = onlineFileName(book);
+        var firstIndex = chapters.findIndex(function(chapter) { return !chapter.isVolume; });
+        if (firstIndex < 0) firstIndex = 0;
+
+        var initialParts = chapters.slice(0, firstIndex).map(function(chapter) { return formatChapter(chapter, ''); });
+        var firstChapter = chapters[firstIndex];
+        el['source-download-modal'].style.display = 'flex';
+        el['source-download-title'].textContent = '正在准备第一章';
+        el['source-download-progress'].style.width = '8%';
+        el['source-download-status'].textContent = firstChapter.title;
+        try {
+            var firstContent = firstChapter.isVolume ? '' : await engine.chapterContent(source, book, firstChapter);
+            initialParts.push(formatChapter(firstChapter, firstContent));
+            var initialText = initialParts.join('\n\n').trim();
+            var initialMetadata = buildOnlineMetadata(source, book, chapters, fileName, initialParts.length, 'downloading');
+            await NR.storageDB.saveBook({
+                id: fileName,
+                content: initialText,
+                onlineSource: initialMetadata.onlineSource
+            });
+            saveShelfMetadata(initialMetadata);
+            el['source-download-modal'].style.display = 'none';
+            NR.state.activeSubView = 'original';
+            NR.state.currentBookCoverUrl = book.coverUrl || null;
+            NR.showReaderView();
+            await NR.loadBook(fileName, initialText);
+
+            var remaining = chapters.slice(firstIndex + 1);
+            if (!remaining.length) {
+                var completeMetadata = buildOnlineMetadata(source, book, chapters, fileName, initialParts.length, 'complete');
+                await NR.storageDB.saveBook({ id: fileName, content: initialText, onlineSource: completeMetadata.onlineSource });
+                saveShelfMetadata(completeMetadata);
+                return;
+            }
+
+            var controller = new AbortController();
+            var session = { controller: controller, fileName: fileName, parts: initialParts.slice(), pending: {}, nextIndex: 0, cachedCount: initialParts.length };
+            state.backgroundDownload = session;
+            state.downloadController = controller;
+            var saveQueue = Promise.resolve();
+            var readerQueue = Promise.resolve();
+            var latestText = initialText;
+            var persist = function(status, forceRefresh) {
+                var snapshotText = session.parts.join('\n\n').trim();
+                latestText = snapshotText;
+                var cachedCount = session.cachedCount;
+                var metadata = buildOnlineMetadata(source, book, chapters, fileName, cachedCount, status);
+                saveQueue = saveQueue.then(function() {
+                    return NR.storageDB.saveBook({ id: fileName, content: snapshotText, onlineSource: metadata.onlineSource });
+                }).then(function() {
+                    saveShelfMetadata(metadata);
+                    if (forceRefresh && NR.state.currentFileName === fileName) {
+                        readerQueue = readerQueue.then(function() { return refreshOpenReader(fileName, snapshotText); }).catch(function(error) {
+                            console.warn('[BookSource] 增量排版失败:', error);
+                        });
+                    }
+                });
+                return saveQueue;
+            };
+
+            var backgroundPromise = engine.downloadBook(source, book, remaining, {
+                concurrency: 3,
+                signal: controller.signal,
+                continueOnError: true,
+                onChapter: function(index, text) {
+                    session.pending[index] = text;
+                    while (Object.prototype.hasOwnProperty.call(session.pending, session.nextIndex)) {
+                        session.parts.push(session.pending[session.nextIndex]);
+                        delete session.pending[session.nextIndex];
+                        session.nextIndex++;
+                    }
+                    session.cachedCount = initialParts.length + session.nextIndex;
+                    if (session.nextIndex === remaining.length || session.nextIndex % 3 === 0) persist('downloading', true);
+                }
+            });
+            backgroundPromise.then(function() {
+                session.cachedCount = initialParts.length + remaining.length;
+                return persist('complete', true);
+            }).catch(function(error) {
+                console.warn('[BookSource] 后台下载未完成:', error);
+                return persist('partial', true);
+            }).finally(function() {
+                if (state.backgroundDownload === session) state.backgroundDownload = null;
+                if (state.downloadController === controller) state.downloadController = null;
+            });
+        } catch (error) {
+            el['source-download-modal'].style.display = 'none';
+            if (error.message !== '下载已取消') toast('首章加载失败：' + error.message, true);
+        }
+    }
+
     async function cacheCurrentBook(openAfter) {
+        if (openAfter) return cacheCurrentBookLazy();
         if (!state.currentDetail || !state.currentDetail.chapters.length) return;
         var source = state.currentDetail.source;
         var book = state.currentDetail.book;
