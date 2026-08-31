@@ -155,7 +155,11 @@
             var lastPage = NR.loadProgress(book.name);
             progressEl.textContent = lastPage ? '上次读至: 第 ' + lastPage + ' 页' : '尚未开始阅读';
             var totalEl = document.createElement('p');
-            totalEl.textContent = '总章节: ' + (book.chapterCount > 0 ? book.chapterCount + ' 章' : '未知');
+            if (book.onlineSource && book.downloadState && book.downloadState !== 'complete') {
+                totalEl.textContent = '已缓存: ' + (book.cachedChapterCount || book.onlineSource.cachedChapters || 0) + ' / ' + (book.chapterCount > 0 ? book.chapterCount : '?') + ' 章';
+            } else {
+                totalEl.textContent = '总章节: ' + (book.chapterCount > 0 ? book.chapterCount + ' 章' : '未知');
+            }
             detailsEl.appendChild(titleEl);
             detailsEl.appendChild(authorEl);
             detailsEl.appendChild(progressEl);

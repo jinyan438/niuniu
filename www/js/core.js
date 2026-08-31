@@ -4,6 +4,9 @@
 
     NR.loadBook = function(fileName, content, options) {
         options = options || {};
+        if (NR.bookSourceState && NR.bookSourceState.onlineReader && NR.bookSourceState.onlineReader.fileName !== fileName) {
+            NR.bookSourceState.onlineReader = null;
+        }
         if (NR.state.isListenMode) NR.stopTts();
         NR.clearSearch();
         NR.state.currentFileName = fileName;
@@ -167,7 +170,19 @@
     };
 
     NR.jumpToPage = function(page) {
-        if (page < 1 || page > NR.state.totalPages || page === NR.state.currentPage || NR.state.isTransitioning) return;
+        // Online books expose only the chapters already cached.  A request for
+        // the page immediately after the cached end is treated as a chapter
+        // boundary and fulfilled asynchronously; this keeps the reader
+        // responsive while Legado rules fetch the next chapter.
+        if (page > NR.state.totalPages) {
+            if (page === NR.state.currentPage + 1 && typeof NR.loadNextOnlineChapter === 'function') {
+                return NR.loadNextOnlineChapter().then(function(loaded) {
+                    if (loaded && page <= NR.state.totalPages && NR.state.currentPage < page) NR.jumpToPage(page);
+                });
+            }
+            return;
+        }
+        if (page < 1 || page === NR.state.currentPage || NR.state.isTransitioning) return;
 
         if (NR.state.settings.enableFocusMode) {
             NR.clearFocusHighlight();
@@ -340,7 +355,12 @@
                         });
                     } else {
                         // TXT 文件直接加载
-                        return NR.loadBook(book.id, book.content);
+                        var restoreOnline = typeof NR.restoreOnlineReaderSession === 'function'
+                            ? NR.restoreOnlineReaderSession(bookMeta, book.content)
+                            : Promise.resolve(false);
+                        return Promise.resolve(restoreOnline).then(function() {
+                            return NR.loadBook(book.id, book.content);
+                        });
                     }
                 } else {
                     throw new Error("在数据库中未找到书籍内容。");
@@ -520,7 +540,7 @@
 
     // Handler for immersive next/prev events triggered from UI
     document.addEventListener('immersive-next-page', function() {
-        if (NR.state.currentPage < NR.state.totalPages) {
+        if (NR.state.currentPage < NR.state.totalPages || (NR.canLoadNextOnlineChapter && NR.canLoadNextOnlineChapter())) {
             NR.jumpToPage(NR.state.currentPage + 1);
             setTimeout(function() {
                 NR.initImmersiveHighlight();
@@ -545,7 +565,7 @@
 
     // Handler for focus mode next/prev events triggered from UI
     document.addEventListener('focus-next-page', function() {
-        if (NR.state.currentPage < NR.state.totalPages) {
+        if (NR.state.currentPage < NR.state.totalPages || (NR.canLoadNextOnlineChapter && NR.canLoadNextOnlineChapter())) {
             NR.jumpToPage(NR.state.currentPage + 1);
             setTimeout(function() {
                 NR.initFocusHighlight();

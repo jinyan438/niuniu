@@ -114,7 +114,7 @@
             NR.els['content-inner'].classList.remove('is-dragging');
             var threshold = NR.state.viewportWidth * 0.3;
             if (Math.abs(NR.state.dragDelta) > 10) NR.state.ignoreNextClick = true;
-            if (NR.state.dragDelta < -threshold && NR.state.currentPage < NR.state.totalPages) NR.jumpToPage(NR.state.currentPage + 1);
+            if (NR.state.dragDelta < -threshold) NR.jumpToPage(NR.state.currentPage + 1);
             else if (NR.state.dragDelta > threshold && NR.state.currentPage > 1) NR.jumpToPage(NR.state.currentPage - 1);
             else NR.els['content-inner'].style.transform = 'translateX(' + NR.state.currentTranslate + 'px)';
             NR.state.dragDelta = 0;
