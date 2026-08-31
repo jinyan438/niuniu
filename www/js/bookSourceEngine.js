@@ -260,11 +260,47 @@
         };
     }
 
+    var nativeRequestSequence = 0;
+
+    function requestViaNativeAsync(options) {
+        var bridge = root.NiuniuBookSource;
+        var registry = root.NovelReader = root.NovelReader || {};
+        registry.__bookSourceRequestCallbacks = registry.__bookSourceRequestCallbacks || {};
+        var id = 'bookSource_' + Date.now().toString(36) + '_' + (++nativeRequestSequence);
+        var timeout = Math.max(5000, Number(options.timeout || 30000) + 5000);
+        return new Promise(function(resolve, reject) {
+            var timer = setTimeout(function() {
+                delete registry.__bookSourceRequestCallbacks[id];
+                reject(new Error('请求超时'));
+            }, timeout);
+            registry.__bookSourceRequestCallbacks[id] = function(nativeResult) {
+                clearTimeout(timer);
+                try {
+                    var parsed = typeof nativeResult === 'string' ? JSON.parse(nativeResult) : nativeResult;
+                    if (parsed && parsed.error) reject(new Error(parsed.error));
+                    else resolve(parsed || { status: 0, url: options.url, headers: {}, body: '' });
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            try {
+                bridge.requestAsync(JSON.stringify(options), id);
+            } catch (error) {
+                clearTimeout(timer);
+                delete registry.__bookSourceRequestCallbacks[id];
+                reject(error);
+            }
+        });
+    }
+
     function NativeTransport() {}
 
     NativeTransport.prototype.request = async function(options) {
         var inlineBody = decodeInlineDataUrl(options.url);
         if (inlineBody !== null) return { status: 200, url: options.url, headers: {}, body: inlineBody };
+        if (root.NiuniuBookSource && typeof root.NiuniuBookSource.requestAsync === 'function') {
+            return requestViaNativeAsync(options);
+        }
         if (root.NiuniuBookSource && typeof root.NiuniuBookSource.request === 'function') {
             var nativeResult = root.NiuniuBookSource.request(JSON.stringify(options));
             var parsedNative = typeof nativeResult === 'string' ? JSON.parse(nativeResult) : nativeResult;
@@ -584,9 +620,25 @@
             getWebViewUA: function() { return DEFAULT_UA; },
             toast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
             longToast: function(message) { if (root.console) root.console.info('[BookSource]', asString(message)); },
-            startBrowser: function(url) {
-                if (root.open) root.open(asString(url), '_blank');
+            startBrowser: function(url, title) {
+                var target = asString(url);
+                var label = asString(title) || '书源登录';
+                if (root.NiuniuBookSource && typeof root.NiuniuBookSource.startBrowser === 'function') {
+                    root.NiuniuBookSource.startBrowser(target, label);
+                } else if (root.open) {
+                    root.open(target, '_blank');
+                }
                 return '';
+            },
+            startBrowserDp: function(url, title) {
+                return this.startBrowser(url, title);
+            },
+            startBrowserAwait: function(url, title) {
+                var target = asString(url);
+                this.startBrowser(target, title);
+                // The native browser is intentionally non-blocking. Source scripts that
+                // only use this call to open a login page can continue immediately.
+                return responseWrapper({ status: 200, url: target, headers: {}, body: '' });
             },
             base64Encode: function(value) { return typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(asString(value)))) : Buffer.from(asString(value)).toString('base64'); },
             base64Decode: decodeBase64,

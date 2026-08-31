@@ -1,13 +1,25 @@
 package com.niuniu.reader;
 
+import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
+import android.text.TextUtils;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -18,7 +30,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.HttpCookie;
 import java.net.URI;
@@ -32,6 +43,8 @@ import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.zip.GZIPInputStream;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -66,16 +79,77 @@ public class MainActivity extends BridgeActivity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         webView.addJavascriptInterface(new FanqieOfficialBridge(this), "NiuniuFanqie");
-        webView.addJavascriptInterface(new BookSourceHttpBridge(), "NiuniuBookSource");
+        webView.addJavascriptInterface(new BookSourceHttpBridge(this, webView), "NiuniuBookSource");
     }
 
     public static class BookSourceHttpBridge {
-        private final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+        private final Activity activity;
+        private final WebView hostWebView;
+        private final java.net.CookieManager cookieManager = new java.net.CookieManager(null, CookiePolicy.ACCEPT_ALL);
+        private final android.webkit.CookieManager webCookieManager = android.webkit.CookieManager.getInstance();
+        private final ExecutorService requestExecutor = Executors.newFixedThreadPool(4);
+        private Dialog browserDialog;
+        private WebView browserWebView;
+        private String browserCookieUrl;
+
+        public BookSourceHttpBridge(Context context, WebView hostWebView) {
+            this.activity = context instanceof Activity ? (Activity) context : null;
+            this.hostWebView = hostWebView;
+            webCookieManager.setAcceptCookie(true);
+        }
 
         @JavascriptInterface
         public String getCookie(String url) {
             try {
                 URI uri = cookieUri(url);
+                return mergeCookies(webCookieManager.getCookie(url), javaCookieHeader(uri));
+            } catch (Exception ignored) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean setCookie(String url, String value) {
+            try {
+                String target = url == null ? "" : url.trim();
+                String cookie = value == null ? "" : value.trim();
+                if (target.isEmpty() || cookie.isEmpty()) return false;
+                webCookieManager.setCookie(target, cookie);
+                webCookieManager.flush();
+                cookieManager.put(cookieUri(target), Collections.singletonMap("Set-Cookie", Collections.singletonList(cookie)));
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean removeCookie(String url) {
+            try {
+                URI uri = cookieUri(url);
+                boolean removed = false;
+                String webCookies = webCookieManager.getCookie(url);
+                if (!TextUtils.isEmpty(webCookies)) {
+                    for (String pair : webCookies.split(";\\s*")) {
+                        int separator = pair.indexOf('=');
+                        if (separator <= 0) continue;
+                        String name = pair.substring(0, separator).trim();
+                        webCookieManager.setCookie(url, name + "=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/");
+                        removed = true;
+                    }
+                    webCookieManager.flush();
+                }
+                for (HttpCookie item : cookieManager.getCookieStore().get(uri)) {
+                    removed = cookieManager.getCookieStore().remove(uri, item) || removed;
+                }
+                return removed;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private String javaCookieHeader(URI uri) {
+            try {
                 Map<String, List<String>> headers = cookieManager.get(uri, Collections.emptyMap());
                 StringBuilder value = new StringBuilder();
                 for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
@@ -92,27 +166,26 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        @JavascriptInterface
-        public boolean setCookie(String url, String value) {
-            try {
-                cookieManager.put(cookieUri(url), Collections.singletonMap("Set-Cookie", Collections.singletonList(value == null ? "" : value)));
-                return true;
-            } catch (Exception ignored) {
-                return false;
+        private static String mergeCookies(String first, String second) {
+            Map<String, String> values = new LinkedHashMap<>();
+            addCookiePairs(values, first);
+            addCookiePairs(values, second);
+            StringBuilder output = new StringBuilder();
+            for (Map.Entry<String, String> entry : values.entrySet()) {
+                if (output.length() > 0) output.append("; ");
+                output.append(entry.getKey()).append('=').append(entry.getValue());
             }
+            return output.toString();
         }
 
-        @JavascriptInterface
-        public boolean removeCookie(String url) {
-            try {
-                URI uri = cookieUri(url);
-                boolean removed = false;
-                for (HttpCookie item : cookieManager.getCookieStore().get(uri)) {
-                    removed = cookieManager.getCookieStore().remove(uri, item) || removed;
-                }
-                return removed;
-            } catch (Exception ignored) {
-                return false;
+        private static void addCookiePairs(Map<String, String> output, String header) {
+            if (TextUtils.isEmpty(header)) return;
+            for (String pair : header.split(";\\s*")) {
+                int separator = pair.indexOf('=');
+                if (separator <= 0) continue;
+                String name = pair.substring(0, separator).trim();
+                if (name.isEmpty()) continue;
+                output.put(name, pair.substring(separator + 1).trim());
             }
         }
 
@@ -161,10 +234,8 @@ public class MainActivity extends BridgeActivity {
                     }
                 }
                 if (!hasCookieHeader) {
-                    Map<String, List<String>> cookieHeaders = cookieManager.get(uri, Collections.emptyMap());
-                    for (Map.Entry<String, List<String>> entry : cookieHeaders.entrySet()) {
-                        if (!entry.getValue().isEmpty()) connection.setRequestProperty(entry.getKey(), String.join("; ", entry.getValue()));
-                    }
+                    String cookieHeader = getCookie(target);
+                    if (!cookieHeader.isEmpty()) connection.setRequestProperty("Cookie", cookieHeader);
                 }
                 connection.setRequestProperty("Accept-Encoding", "gzip");
 
@@ -180,6 +251,7 @@ public class MainActivity extends BridgeActivity {
                 int status = connection.getResponseCode();
                 Map<String, List<String>> responseHeaders = connection.getHeaderFields();
                 cookieManager.put(uri, responseHeaders);
+                syncResponseCookies(connection.getURL().toString(), responseHeaders);
                 InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
                 if (stream == null) stream = connection.getInputStream();
                 if ("gzip".equalsIgnoreCase(connection.getContentEncoding())) stream = new GZIPInputStream(stream);
@@ -205,6 +277,187 @@ public class MainActivity extends BridgeActivity {
             } finally {
                 if (connection != null) connection.disconnect();
             }
+        }
+
+        @JavascriptInterface
+        public void requestAsync(final String requestJson, final String callbackId) {
+            if (hostWebView == null || TextUtils.isEmpty(callbackId)) return;
+            requestExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final String result = request(requestJson);
+                    hostWebView.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            String callback = JSONObject.quote(callbackId);
+                            String payload = JSONObject.quote(result == null ? "" : result);
+                            String script = "(function(){var p=window.NovelReader&&window.NovelReader.__bookSourceRequestCallbacks;var k=" + callback + ";var c=p&&p[k];if(c){delete p[k];c(" + payload + ");}})();";
+                            hostWebView.evaluateJavascript(script, null);
+                        }
+                    });
+                }
+            });
+        }
+
+        private void syncResponseCookies(String url, Map<String, List<String>> headers) {
+            if (headers == null || TextUtils.isEmpty(url)) return;
+            boolean changed = false;
+            for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+                if (entry.getKey() == null || !"set-cookie".equalsIgnoreCase(entry.getKey()) || entry.getValue() == null) continue;
+                for (String cookie : entry.getValue()) {
+                    if (TextUtils.isEmpty(cookie)) continue;
+                    webCookieManager.setCookie(url, cookie);
+                    changed = true;
+                }
+            }
+            if (changed) webCookieManager.flush();
+        }
+
+        @JavascriptInterface
+        public boolean startBrowser(String url, String title) {
+            final String target = url == null ? "" : url.trim();
+            final String pageTitle = TextUtils.isEmpty(title) ? "书源登录" : title.trim();
+            if (activity == null || TextUtils.isEmpty(target)) return false;
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    showLoginBrowser(target, pageTitle);
+                }
+            });
+            return true;
+        }
+
+        private void showLoginBrowser(String url, String title) {
+            if (activity.isFinishing()) return;
+            if (browserDialog != null && browserDialog.isShowing() && browserWebView != null) {
+                browserCookieUrl = url;
+                browserWebView.loadUrl(url);
+                return;
+            }
+
+            final Dialog dialog = new Dialog(activity);
+            dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+            dialog.setCancelable(true);
+
+            LinearLayout container = new LinearLayout(activity);
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.setBackgroundColor(Color.WHITE);
+
+            LinearLayout toolbar = new LinearLayout(activity);
+            toolbar.setGravity(Gravity.CENTER_VERTICAL);
+            toolbar.setPadding(dp(8), 0, dp(8), 0);
+            toolbar.setBackgroundColor(Color.WHITE);
+            TextView heading = new TextView(activity);
+            heading.setText(title);
+            heading.setTextColor(Color.rgb(30, 30, 30));
+            heading.setTextSize(18);
+            heading.setSingleLine(true);
+            heading.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            toolbar.addView(heading, new LinearLayout.LayoutParams(0, dp(52), 1));
+
+            Button close = new Button(activity);
+            close.setText("关闭");
+            close.setTextSize(14);
+            close.setAllCaps(false);
+            Button done = new Button(activity);
+            done.setText("完成登录");
+            done.setTextSize(14);
+            done.setAllCaps(false);
+            toolbar.addView(close, new LinearLayout.LayoutParams(dp(72), dp(48)));
+            toolbar.addView(done, new LinearLayout.LayoutParams(dp(96), dp(48)));
+            container.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+
+            WebView loginView = new WebView(activity);
+            WebSettings settings = loginView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setDatabaseEnabled(true);
+            settings.setAllowFileAccess(false);
+            settings.setAllowContentAccess(true);
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+            settings.setUserAgentString(settings.getUserAgentString());
+            android.webkit.CookieManager.getInstance().setAcceptCookie(true);
+            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(loginView, true);
+            loginView.setWebViewClient(new WebViewClient());
+            loginView.setBackgroundColor(Color.WHITE);
+            container.addView(loginView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+            close.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    finishLoginBrowser(dialog);
+                }
+            });
+            done.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    finishLoginBrowser(dialog);
+                }
+            });
+            dialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
+                @Override
+                public void onCancel(DialogInterface dialogInterface) {
+                    finishLoginBrowser(dialog);
+                }
+            });
+            dialog.setOnDismissListener(dialogInterface -> {
+                if (browserWebView != null) {
+                    browserWebView.stopLoading();
+                    browserWebView.destroy();
+                }
+                browserWebView = null;
+                browserDialog = null;
+                browserCookieUrl = null;
+            });
+            dialog.setContentView(container);
+            browserDialog = dialog;
+            browserWebView = loginView;
+            browserCookieUrl = url;
+            dialog.show();
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.WHITE));
+                dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            }
+            loginView.loadUrl(url);
+        }
+
+        private void finishLoginBrowser(Dialog dialog) {
+            if (browserWebView != null) {
+                String currentUrl = browserWebView.getUrl();
+                if (!TextUtils.isEmpty(currentUrl)) syncCookiesToJava(currentUrl);
+            }
+            if (!TextUtils.isEmpty(browserCookieUrl) && !browserCookieUrl.equals(browserWebView == null ? "" : browserWebView.getUrl())) {
+                syncCookiesToJava(browserCookieUrl);
+            }
+            webCookieManager.flush();
+            dialog.dismiss();
+            if (hostWebView != null) {
+                hostWebView.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        hostWebView.evaluateJavascript("(function(){if(window.NovelReader&&typeof window.NovelReader.bookSourceLoginCompleted==='function'){window.NovelReader.bookSourceLoginCompleted();}})();", null);
+                    }
+                });
+            }
+        }
+
+        private void syncCookiesToJava(String url) {
+            try {
+                URI uri = cookieUri(url);
+                String cookies = webCookieManager.getCookie(url);
+                if (TextUtils.isEmpty(cookies)) return;
+                for (String pair : cookies.split(";\\s*")) {
+                    if (pair.indexOf('=') <= 0) continue;
+                    cookieManager.put(uri, Collections.singletonMap("Set-Cookie", Collections.singletonList(pair.trim())));
+                }
+            } catch (Exception ignored) {
+                // Cookie synchronization is best-effort; the WebView store remains authoritative.
+            }
+        }
+
+        private int dp(int value) {
+            float density = activity.getResources().getDisplayMetrics().density;
+            return Math.round(value * density);
         }
 
         @JavascriptInterface

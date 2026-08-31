@@ -185,6 +185,54 @@ test('supports Legado cookie key lookups used by content rules', () => {
     assert.equal(bindings.cookie.getKey(source.bookSourceUrl, 'device'), 'android');
 });
 
+test('routes source login pages through the native in-app browser', () => {
+    const previousBridge = global.NiuniuBookSource;
+    const calls = [];
+    global.NiuniuBookSource = {
+        startBrowser(url, title) { calls.push([url, title]); return true; }
+    };
+    try {
+        const engine = new BookSourceEngine();
+        const source = normalizeSource({ bookSourceUrl: 'https://login.test', bookSourceName: 'Login Test' });
+        const bindings = engine.scriptBindings({ source, result: '', src: '', baseUrl: source.bookSourceUrl });
+        assert.equal(bindings.java.startBrowser('https://login.test/sign-in', '大灰狼登录'), '');
+        const response = bindings.java.startBrowserAwait('https://login.test/user', '用户后台');
+        assert.equal(response.body(), '');
+        assert.equal(response.request().url(), 'https://login.test/user');
+        assert.deepEqual(calls, [
+            ['https://login.test/sign-in', '大灰狼登录'],
+            ['https://login.test/user', '用户后台']
+        ]);
+    } finally {
+        if (previousBridge === undefined) delete global.NiuniuBookSource;
+        else global.NiuniuBookSource = previousBridge;
+    }
+});
+
+test('uses the asynchronous native transport when available', async () => {
+    const previousBridge = global.NiuniuBookSource;
+    global.NiuniuBookSource = {
+        requestAsync(requestJson, callbackId) {
+            const request = JSON.parse(requestJson);
+            setImmediate(() => global.NovelReader.__bookSourceRequestCallbacks[callbackId](JSON.stringify({
+                status: 200,
+                url: request.url,
+                headers: {},
+                body: 'async response'
+            })));
+        }
+    };
+    try {
+        const engine = new BookSourceEngine();
+        const response = await engine.transport.request({ url: 'https://async.test/chapter', timeout: 1000 });
+        assert.equal(response.body, 'async response');
+    } finally {
+        if (previousBridge === undefined) delete global.NiuniuBookSource;
+        else global.NiuniuBookSource = previousBridge;
+        if (global.NovelReader) delete global.NovelReader.__bookSourceRequestCallbacks;
+    }
+});
+
 test('interpolates multiple Legado field rules inside a text template', () => {
     const engine = new BookSourceEngine();
     const source = normalizeSource({ bookSourceUrl: 'https://template.test', bookSourceName: 'Template Test' });

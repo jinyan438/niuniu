@@ -576,6 +576,19 @@
         loadSources();
     };
 
+    // Called by the native login WebView after its cookies have been flushed.
+    NR.bookSourceLoginCompleted = function() {
+        if (!state.initialized) return;
+        toast('登录信息已同步，可继续阅读');
+        if (state.activeTab === 'explore') {
+            renderExplore();
+            if (state.activeKind) loadExplore(true);
+        } else if (state.activeTab === 'search') {
+            var keyword = el['source-search-keyword'].value.trim();
+            if (keyword && !state.searchBusy) searchSources(keyword);
+        }
+    };
+
     NR.bookSourceState = state;
     NR.bookSourceEngine = engine;
 })();
