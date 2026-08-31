@@ -91,6 +91,7 @@ public class MainActivity extends BridgeActivity {
         private Dialog browserDialog;
         private WebView browserWebView;
         private String browserCookieUrl;
+        private boolean browserCompletionSent;
 
         public BookSourceHttpBridge(Context context, WebView hostWebView) {
             this.activity = context instanceof Activity ? (Activity) context : null;
@@ -413,6 +414,7 @@ public class MainActivity extends BridgeActivity {
             browserDialog = dialog;
             browserWebView = loginView;
             browserCookieUrl = url;
+            browserCompletionSent = false;
             dialog.show();
             if (dialog.getWindow() != null) {
                 dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.WHITE));
@@ -422,6 +424,8 @@ public class MainActivity extends BridgeActivity {
         }
 
         private void finishLoginBrowser(Dialog dialog) {
+            if (browserCompletionSent) return;
+            browserCompletionSent = true;
             if (browserWebView != null) {
                 String currentUrl = browserWebView.getUrl();
                 if (!TextUtils.isEmpty(currentUrl)) syncCookiesToJava(currentUrl);

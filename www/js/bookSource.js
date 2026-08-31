@@ -580,13 +580,9 @@
     NR.bookSourceLoginCompleted = function() {
         if (!state.initialized) return;
         toast('登录信息已同步，可继续阅读');
-        if (state.activeTab === 'explore') {
-            renderExplore();
-            if (state.activeKind) loadExplore(true);
-        } else if (state.activeTab === 'search') {
-            var keyword = el['source-search-keyword'].value.trim();
-            if (keyword && !state.searchBusy) searchSources(keyword);
-        }
+        // Do not re-run the active discovery rule here. Some Legado sources expose
+        // a login entry as their first explore item, and re-running it would open
+        // the login browser again immediately after it was closed.
     };
 
     NR.bookSourceState = state;
