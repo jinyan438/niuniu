@@ -670,9 +670,9 @@
                 // sources perform extra synchronous requests.  They are not
                 // part of the chapter text and would defeat lazy loading, so
                 // turn them off while an async reader request is running.
-                if (asyncMode) {
+                if (asyncMode && value !== undefined && value !== null && value !== '') {
                     try {
-                        var parsed = typeof value === 'string' && value ? parseLooseJson(value) : (value || {});
+                        var parsed = typeof value === 'string' ? parseLooseJson(value) : value;
                         if (parsed && typeof parsed === 'object') {
                             parsed = Object.assign({}, parsed, { fqcommunity: 'off', fqpara: 'off' });
                             return JSON.stringify(parsed);
@@ -1004,8 +1004,13 @@
             fallbackCode += '\nif (__ruleResult === undefined && typeof ' + name + ' !== "undefined" && ' + name + ' !== null && ' + name + ' !== "") __ruleResult = ' + name + ';';
         });
         fallbackCode += '\nreturn __ruleResult === undefined ? "" : __ruleResult;';
-        var body = asString(library) + '\n' + expose + '\n' + transformed +
-            fallbackCode;
+        // Legado rules frequently assign outputs such as `content_url`
+        // without declaring them. Declare those names in this invocation so
+        // they cannot leak onto window and be reused by a later rule.
+        var localFallbackNames = fallbackNames.filter(function(name) { return name !== 'result'; });
+        var declarations = localFallbackNames.length ? 'var ' + localFallbackNames.join(', ') + ';\n' : '';
+        var body = declarations + '{\n' + asString(library) + '\n' + expose + '\n' + transformed +
+            fallbackCode + '\n}';
         var runner;
         try {
             runner = AsyncFunction.apply(null, names.concat(body));

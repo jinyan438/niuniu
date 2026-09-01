@@ -324,7 +324,9 @@ test('returns Legado URL variables assigned inside conditional JS rules', async 
     const rule = '<js>if (result.kind === "encoded") { content_url = "data:text/plain,正文"; } else { content_url = "https://variable-rule.test/fallback"; }</js>';
     const context = { source, result: { kind: 'encoded' }, src: { kind: 'encoded' }, baseUrl: source.bookSourceUrl };
 
+    delete globalThis.content_url;
     assert.equal(await engine.extractStringAsync(context.result, rule, context, true), 'data:text/plain,正文');
+    assert.equal(Object.hasOwn(globalThis, 'content_url'), false);
 });
 
 test('isolates concurrent asynchronous source rules', async () => {
@@ -345,6 +347,46 @@ test('isolates concurrent asynchronous source rules', async () => {
     const run = (source, delay) => engine.evalJsAsync(rule, { source, result: { delay }, src: { delay }, baseUrl: source.bookSourceUrl });
 
     assert.deepEqual(await Promise.all([run(sourceA, 1), run(sourceB, 10)]), ['A', 'B']);
+});
+
+test('preserves source defaults when an async rule initializes empty variables', async () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({
+        bookSourceUrl: 'https://source-defaults.test',
+        bookSourceName: 'Source Defaults',
+        jsLib: `
+            function getArguments(value, key) {
+                var settings;
+                try { settings = JSON.parse(value); }
+                catch (error) {
+                    settings = {
+                        server: 'https://default-server.test',
+                        tab: 'novel',
+                        sources: 'all',
+                        fqcommunity: 'on',
+                        fqpara: 'on'
+                    };
+                }
+                return key ? settings[key] : settings;
+            }
+            function setArguments(key, value) {
+                var settings = getArguments(this.source.getVariable(), '');
+                settings[key] = value;
+                this.source.setVariable(JSON.stringify(settings));
+            }
+        `
+    });
+    const rule = '<js>var server = getArguments(source.getVariable(), "server"); setArguments("session", "ready"); return server;</js>';
+
+    assert.equal(await engine.evalJsAsync(rule, { source, result: '', baseUrl: source.bookSourceUrl }), 'https://default-server.test');
+    assert.deepEqual(JSON.parse(engine.variableMap(source).get('__source_variable')), {
+        server: 'https://default-server.test',
+        tab: 'novel',
+        sources: 'all',
+        fqcommunity: 'on',
+        fqpara: 'on',
+        session: 'ready'
+    });
 });
 
 test('reports each chapter as soon as background downloading completes', async () => {
