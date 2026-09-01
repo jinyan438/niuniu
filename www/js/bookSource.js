@@ -769,19 +769,12 @@
                 }
             });
             var fileName = onlineFileName(book);
-            await NR.storageDB.saveBook({
-                id: fileName,
-                content: content,
-                onlineSource: { sourceUrl: source.bookSourceUrl, sourceName: source.bookSourceName, bookUrl: book.bookUrl, tocUrl: book.tocUrl, cachedAt: Date.now() }
+            var totalTextChapters = chapters.filter(function(chapter) { return !chapter.isVolume; }).length;
+            var metadata = buildOnlineMetadata(source, book, chapters, fileName, totalTextChapters, 'complete', chapters.length, {
+                currentIndex: chapters.length ? chapters.length - 1 : 0,
+                loadedIndexes: chapters.map(function(chapter, index) { return chapter.isVolume ? -1 : index; }).filter(function(index) { return index >= 0; })
             });
-            var metadata = {
-                name: fileName,
-                cover: book.coverUrl || null,
-                author: book.author || '未知',
-                chapterCount: chapters.filter(function(chapter) { return !chapter.isVolume; }).length,
-                tags: Array.from(new Set(['网络书源', source.bookSourceName].concat(String(book.kind || '').split(/[,/|，、\s]+/).filter(Boolean).slice(0, 5)))),
-                onlineSource: { sourceUrl: source.bookSourceUrl, bookUrl: book.bookUrl }
-            };
+            await NR.storageDB.saveBook({ id: fileName, content: content, onlineSource: metadata.onlineSource });
             var existingIndex = NR.state.bookshelf.findIndex(function(item) { return item.name === fileName; });
             if (existingIndex >= 0) NR.state.bookshelf[existingIndex] = metadata;
             else NR.state.bookshelf.push(metadata);
@@ -838,6 +831,10 @@
 
     function onlineChapterKey(chapter) {
         return String(chapter && chapter.title || '') + '\n' + String(chapter && chapter.url || '');
+    }
+
+    function onlineChapterTitleKey(chapter) {
+        return String(chapter && chapter.title || '').replace(/\s+/g, ' ').trim();
     }
 
     function cachedOnlineChapterKeys(online, bookMeta, existingText) {
@@ -916,11 +913,29 @@
             });
             var freshKeys = new Set();
             var legacyOrdinal = 0;
+            var savedTextChapters = cacheInfo.savedChapters.filter(function(chapter) { return !chapter.isVolume; });
+            var currentTextOrdinal = 0;
             chapters.forEach(function(chapter, index) {
                 if (chapter.isVolume) return;
-                if (savedKeys.has(onlineChapterKey(chapter))) freshKeys.add(index);
-                else if (legacyOrdinal < legacyCount) freshKeys.add(index);
+                var exactKey = onlineChapterKey(chapter);
+                if (savedKeys.has(exactKey)) {
+                    freshKeys.add(index);
+                } else if (legacyOrdinal < legacyCount) {
+                    freshKeys.add(index);
+                } else {
+                    // Some sources rebuild data URLs on every catalog request
+                    // even though the chapter is unchanged. When the saved
+                    // chapter at the same text ordinal was cached, matching
+                    // its title avoids downloading that chapter again while
+                    // still allowing appended chapters through as pending.
+                    var savedChapter = savedTextChapters[currentTextOrdinal];
+                    if (savedChapter && savedKeys.has(onlineChapterKey(savedChapter)) &&
+                        onlineChapterTitleKey(savedChapter) === onlineChapterTitleKey(chapter)) {
+                        freshKeys.add(index);
+                    }
+                }
                 legacyOrdinal++;
+                currentTextOrdinal++;
             });
             var pendingChapters = chapters.filter(function(chapter, index) {
                 return !chapter.isVolume && !freshKeys.has(index);
