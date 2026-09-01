@@ -229,7 +229,26 @@
             NR.renderBookshelf();
         });
 
+        // Handle shelf actions in the capture phase.  This runs before the
+        // row's normal click handler, so a tap on an icon can never fall
+        // through to opening the book or start a text-selection gesture.
         NR.els['bookshelf-grid'].addEventListener('click', function(event) {
+            var capturedButton = event.target && event.target.closest ? event.target.closest('.book-actions button') : null;
+            var isDownloadButton = capturedButton && capturedButton.classList.contains('download-book-btn-on-shelf');
+            var isTagButton = capturedButton && capturedButton.classList.contains('tag-book-btn');
+            if (capturedButton && (isDownloadButton || isTagButton)) {
+                event.preventDefault();
+                if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+                else event.stopPropagation();
+                var capturedBook = capturedButton.closest('.book-item');
+                var capturedName = capturedBook && capturedBook.dataset.bookName;
+                if (capturedName && isDownloadButton && typeof NR.downloadOnlineBookFromShelf === 'function') {
+                    NR.downloadOnlineBookFromShelf(capturedName);
+                } else if (capturedName && capturedButton.classList.contains('tag-book-btn')) {
+                    NR.openTagEditModal(capturedName);
+                }
+                return;
+            }
             var target = event.target;
             var actionButton = target && target.closest ? target.closest('.book-actions button') : null;
             if (actionButton) NR.state.ignoreNextClick = false;
@@ -294,7 +313,7 @@
             } else {
                 NR.loadBookFromShelf(bookName);
             }
-        });
+        }, true);
 
         NR.els['add-tag-form'].addEventListener('submit', function(event) {
             event.preventDefault();
@@ -1354,8 +1373,20 @@
         document.addEventListener('mousemove', dragMove);
         document.addEventListener('touchmove', dragMove, { passive: true });
         ['mouseup', 'mouseleave', 'touchend'].forEach(function(evt) { document.addEventListener(evt, dragEnd); });
-        NR.els['bookshelf-grid'].addEventListener('mousedown', shelfDragStart);
-        NR.els['bookshelf-grid'].addEventListener('touchstart', shelfDragStart, { passive: false });
+        NR.els['bookshelf-grid'].addEventListener('mousedown', function(event) {
+            if (event.target && event.target.closest && event.target.closest('.book-actions')) {
+                event.stopPropagation();
+                return;
+            }
+            shelfDragStart(event);
+        });
+        NR.els['bookshelf-grid'].addEventListener('touchstart', function(event) {
+            if (event.target && event.target.closest && event.target.closest('.book-actions')) {
+                event.stopPropagation();
+                return;
+            }
+            shelfDragStart(event);
+        }, { passive: false });
         document.addEventListener('mousemove', shelfDragMove, { passive: false });
         ['mouseup', 'mouseleave', 'touchend'].forEach(function(evt) { document.addEventListener(evt, shelfDragEnd); });
 

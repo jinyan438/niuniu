@@ -15102,6 +15102,9 @@ body.theme-eink .book-source-view {
     justify-content: center;
     gap: 7px;
     box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
 }
 
 .source-primary-button { border: 1px solid var(--source-accent); background: var(--source-accent); color: #ffffff; }

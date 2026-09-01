@@ -839,14 +839,27 @@
             toast('只有网络书源书籍支持下载全部章节', true);
             return;
         }
+        // Show feedback synchronously on tap, before restoring the source or
+        // resolving a saved table of contents.  Those operations can involve
+        // IndexedDB and must not leave the user staring at an apparently dead
+        // bookshelf.
+        el['source-download-modal'].style.display = 'flex';
+        el['source-download-title'].textContent = '正在准备下载';
+        el['source-download-progress'].style.width = '0%';
+        el['source-download-status'].textContent = '正在读取书源和目录…';
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         state.downloadController = controller;
         try {
+            // Let the WebView paint the modal before a source rule starts a
+            // potentially synchronous java.ajax request.
+            await new Promise(function(resolve) {
+                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
+                else setTimeout(resolve, 0);
+            });
             var resolved = await resolveShelfOnlineBook(bookMeta);
             var source = resolved.source;
             var book = resolved.book;
             var chapters = resolved.chapters;
-            el['source-download-modal'].style.display = 'flex';
             el['source-download-title'].textContent = '正在下载全部章节';
             el['source-download-progress'].style.width = '0%';
             el['source-download-status'].textContent = '准备下载《' + (book.name || bookMeta.name) + '》';
