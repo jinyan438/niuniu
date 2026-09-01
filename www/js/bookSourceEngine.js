@@ -989,12 +989,19 @@
         }).join('\n');
         var AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
         var transformed = addImplicitAsyncRuleReturn(rewriteAsyncJavaCalls(script));
-        // Most declarative JS rules leave their result in `data` or end with a
-        // bare expression such as `result`; addImplicitAsyncRuleReturn adds an
-        // explicit return for that form.  A rule with no return must remain
-        // empty, matching the legacy Function() behavior.
+        // Legado sources commonly leave a value in a named variable after a
+        // conditional block (for example `content_url = ...`) instead of
+        // writing an explicit return. Preserve that convention while keeping
+        // rules with no output empty.
+        var fallbackNames = ['data', 'content_url', 'bookUrl', 'tocUrl', 'chapterUrl', 'url', 'content'];
+        if (/\bresult\s*=/.test(transformed) || /(?:^|[;\n])\s*result\s*;?\s*$/.test(transformed)) fallbackNames.push('result');
+        var fallbackCode = '\n;var __ruleResult;';
+        fallbackNames.forEach(function(name) {
+            fallbackCode += '\nif (__ruleResult === undefined && typeof ' + name + ' !== "undefined" && ' + name + ' !== null && ' + name + ' !== "") __ruleResult = ' + name + ';';
+        });
+        fallbackCode += '\nreturn __ruleResult === undefined ? "" : __ruleResult;';
         var body = asString(library) + '\n' + expose + '\n' + transformed +
-            '\n;return typeof data !== "undefined" ? data : "";';
+            fallbackCode;
         var runner;
         try {
             runner = AsyncFunction.apply(null, names.concat(body));

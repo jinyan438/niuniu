@@ -318,6 +318,15 @@ test('executes chapter JS ajax rules without blocking on the sync transport', as
     ]);
 });
 
+test('returns Legado URL variables assigned inside conditional JS rules', async () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://variable-rule.test', bookSourceName: 'Variable Rule Test' });
+    const rule = '<js>if (result.kind === "encoded") { content_url = "data:text/plain,正文"; } else { content_url = "https://variable-rule.test/fallback"; }</js>';
+    const context = { source, result: { kind: 'encoded' }, src: { kind: 'encoded' }, baseUrl: source.bookSourceUrl };
+
+    assert.equal(await engine.extractStringAsync(context.result, rule, context, true), 'data:text/plain,正文');
+});
+
 test('reports each chapter as soon as background downloading completes', async () => {
     const source = normalizeSource({ bookSourceUrl: 'https://progress.test', bookSourceName: 'Progress Test' });
     const engine = new BookSourceEngine({
