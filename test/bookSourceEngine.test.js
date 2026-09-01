@@ -5,7 +5,9 @@ const {
     BookSourceImporter,
     normalizeSource,
     jsonPath,
-    splitUrlOption
+    splitUrlOption,
+    normalizeInlineBookUrl,
+    decodeInlineDataUrl
 } = require('../www/js/bookSourceEngine.js');
 
 test('normalizes legacy flat Legado fields', () => {
@@ -60,6 +62,56 @@ test('parses URL options without losing commas in request bodies', () => {
     assert.equal(parsed.url, 'https://books.test/search');
     assert.equal(parsed.option.method, 'POST');
     assert.deepEqual(parsed.option.body, { q: 'a,b' });
+});
+
+test('converts encoded JSON book URLs into inline data URLs', async () => {
+    const payload = JSON.stringify({ book_name: '测试书', book_id: 'abc123' });
+    const withPlainOptions = encodeURIComponent(payload) + ',{"type":"qingtian"}';
+    const withEncodedOptions = encodeURIComponent(payload + ',{"type":"qingtian"}');
+
+    for (const value of [encodeURIComponent(payload), withPlainOptions, withEncodedOptions]) {
+        const normalized = normalizeInlineBookUrl(value);
+        assert.match(normalized, /^data:application\/json,/);
+        assert.equal(decodeInlineDataUrl(normalized), payload);
+    }
+
+    const engine = new BookSourceEngine();
+    const response = await engine.transport.request({ url: withEncodedOptions });
+    assert.equal(response.status, 200);
+    assert.equal(response.body, payload);
+});
+
+test('opens a book whose search result URL is encoded JSON', async () => {
+    const payload = JSON.stringify({ book_name: '编码书', author: '作者', chapters: [{ title: '第一章', content: '正文' }] });
+    const source = normalizeSource({
+        bookSourceUrl: 'https://encoded-book.test',
+        bookSourceName: 'Encoded Book Test',
+        searchUrl: '/search',
+        ruleSearch: { bookList: '$.books', name: '$.title', author: '$.author', bookUrl: '$.url' },
+        ruleBookInfo: { name: '$.book_name', author: '$.author' }
+    });
+    const engine = new BookSourceEngine({
+        transport: {
+            async request(options) {
+                if (options.url === 'https://encoded-book.test/search') {
+                    return { status: 200, url: options.url, headers: {}, body: JSON.stringify({ books: [{ title: '编码书', author: '作者', url: encodeURIComponent(payload) }] }) };
+                }
+                return new BookSourceEngine().transport.request(options);
+            }
+        }
+    });
+
+    const [book] = await engine.search(source, '编码书', 1);
+    assert.match(book.bookUrl, /^data:application\/json,/);
+    const info = await engine.bookInfo(source, book);
+    assert.equal(info.name, '编码书');
+    assert.equal(info.author, '作者');
+});
+
+test('keeps existing base64 data book URLs intact', () => {
+    const url = 'data:;base64,eyJib29rX2lkIjoiYWJjMTIzIn0=,{"type":"qingtian"}';
+    assert.equal(normalizeInlineBookUrl(url), url);
+    assert.equal(decodeInlineDataUrl(url), '{"book_id":"abc123"}');
 });
 
 test('interpolates and encodes form POST requests', () => {

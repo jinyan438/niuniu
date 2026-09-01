@@ -58,9 +58,90 @@
 
     function decodeInlineDataUrl(value) {
         var url = asString(value).trim();
-        if (!/^data:;base64,/i.test(url)) return null;
-        var payload = url.slice(url.indexOf(',') + 1).split(',')[0].trim();
-        try { return decodeBase64(payload); } catch (e) { return ''; }
+        if (/^data:;base64,/i.test(url)) {
+            var payload = url.slice(url.indexOf(',') + 1).split(',')[0].trim();
+            try { return decodeBase64(payload); } catch (e) { return ''; }
+        }
+        var dataMatch = url.match(/^data:(?:application\/json|text\/plain)(?:;charset=[^,;]+)?,([\s\S]*)$/i);
+        if (dataMatch) {
+            var payload = dataMatch[1];
+            // URL options follow the encoded payload (for example,
+            // `,{"type":"qingtian"}`). A raw JSON payload starts with `{`
+            // and must not be mistaken for that option suffix.
+            var isStrictJsonPayload = false;
+            try {
+                if (/^\s*[\[{]/.test(payload)) {
+                    JSON.parse(payload);
+                    isStrictJsonPayload = true;
+                }
+            } catch (e) { /* a payload with options is not one JSON document */ }
+            if (!isStrictJsonPayload) {
+                for (var optionIndex = payload.lastIndexOf(',{'); optionIndex >= 0; optionIndex = payload.lastIndexOf(',{', optionIndex - 1)) {
+                    try {
+                        var optionValue = parseLooseJson(payload.slice(optionIndex + 1).trim());
+                        if (optionValue && typeof optionValue === 'object' && !Array.isArray(optionValue)) {
+                            payload = payload.slice(0, optionIndex);
+                            break;
+                        }
+                    } catch (e) { /* keep looking for an option suffix */ }
+                }
+            }
+            try { return decodeURIComponent(payload); } catch (e) { return payload; }
+        }
+        return null;
+    }
+
+    function normalizeInlineBookUrl(value) {
+        var url = asString(value).trim();
+        if (!url || /^data:|^blob:|^javascript:/i.test(url)) return url;
+        var parsed = splitUrlOption(url);
+        var option = parsed.option || {};
+        var decoded = parsed.url;
+        var decodedSuccessfully = false;
+        for (var pass = 0; pass < 3; pass++) {
+            try {
+                var next = decodeURIComponent(decoded);
+                decodedSuccessfully = true;
+                if (next === decoded) break;
+                decoded = next;
+            } catch (e) {
+                decodedSuccessfully = false;
+                break;
+            }
+        }
+        var validJson = false;
+        try {
+            if (/^[\[{]/.test(decoded.trim())) {
+                // Use strict JSON here so a JavaScript comma expression such
+                // as `{"book":1},{"type":"..."}` is recognized as a
+                // payload-plus-options URL instead of one document.
+                JSON.parse(decoded);
+                validJson = true;
+            }
+        } catch (e) { /* try the fully encoded URL form below */ }
+        // Some sources encode the complete `bookUrl`, including its option
+        // suffix. Decode and split that form as a second attempt.
+        if (!decodedSuccessfully || !validJson) {
+            try {
+                var wholeDecoded = decodeURIComponent(url);
+                var wholeParsed = splitUrlOption(wholeDecoded);
+                if (Object.keys(wholeParsed.option || {}).length) option = wholeParsed.option;
+                decoded = wholeParsed.url;
+                for (var wholePass = 0; wholePass < 2; wholePass++) {
+                    var decodedWholePart = decodeURIComponent(decoded);
+                    if (decodedWholePart === decoded) break;
+                    decoded = decodedWholePart;
+                }
+            } catch (e) { return url; }
+        }
+        if (!/^[\[{]/.test(decoded.trim())) return url;
+        try {
+            parseLooseJson(decoded);
+            var suffix = Object.keys(option).length ? ',' + JSON.stringify(option) : '';
+            return 'data:application/json,' + encodeURIComponent(decoded) + suffix;
+        } catch (e) {
+            return url;
+        }
     }
 
     function parseRuleObject(value) {
@@ -211,7 +292,7 @@
     }
 
     function resolveUrl(value, baseUrl) {
-        var url = asString(value).trim();
+        var url = normalizeInlineBookUrl(value);
         if (!url || /^data:|^blob:|^javascript:/i.test(url)) return url;
         var parsed = splitUrlOption(url);
         try {
@@ -312,6 +393,7 @@
     function NativeTransport() {}
 
     NativeTransport.prototype.request = async function(options) {
+        options = Object.assign({}, options || {}, { url: normalizeInlineBookUrl(options && options.url) });
         var inlineBody = decodeInlineDataUrl(options.url);
         if (inlineBody !== null) return { status: 200, url: options.url, headers: {}, body: inlineBody };
         if (root.NiuniuBookSource && typeof root.NiuniuBookSource.requestAsync === 'function') {
@@ -362,6 +444,7 @@
     };
 
     NativeTransport.prototype.requestSync = function(options) {
+        options = Object.assign({}, options || {}, { url: normalizeInlineBookUrl(options && options.url) });
         var inlineBody = decodeInlineDataUrl(options.url);
         if (inlineBody !== null) return { status: 200, url: options.url, headers: {}, body: inlineBody };
         if (!root.NiuniuBookSource || typeof root.NiuniuBookSource.request !== 'function') {
@@ -906,11 +989,12 @@
         }).join('\n');
         var AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
         var transformed = addImplicitAsyncRuleReturn(rewriteAsyncJavaCalls(script));
-        // Most declarative JS rules leave their result in `data` or mutate the
-        // supplied `result` binding.  Returning those values also covers rules
-        // whose final expression is a bare statement (the common Legado form).
+        // Most declarative JS rules leave their result in `data` or end with a
+        // bare expression such as `result`; addImplicitAsyncRuleReturn adds an
+        // explicit return for that form.  A rule with no return must remain
+        // empty, matching the legacy Function() behavior.
         var body = asString(library) + '\n' + expose + '\n' + transformed +
-            '\n;return typeof data !== "undefined" ? data : (typeof result !== "undefined" ? result : "");';
+            '\n;return typeof data !== "undefined" ? data : "";';
         var runner;
         try {
             runner = AsyncFunction.apply(null, names.concat(body));
@@ -1439,6 +1523,8 @@
 
     BookSourceEngine.normalizeSource = normalizeSource;
     BookSourceEngine.parseLooseJson = parseLooseJson;
+    BookSourceEngine.normalizeInlineBookUrl = normalizeInlineBookUrl;
+    BookSourceEngine.decodeInlineDataUrl = decodeInlineDataUrl;
     BookSourceEngine.jsonPath = jsonPath;
     BookSourceEngine.resolveUrl = resolveUrl;
     BookSourceEngine.splitUrlOption = splitUrlOption;
@@ -1448,6 +1534,8 @@
         BookSourceImporter: BookSourceImporter,
         normalizeSource: normalizeSource,
         parseLooseJson: parseLooseJson,
+        normalizeInlineBookUrl: normalizeInlineBookUrl,
+        decodeInlineDataUrl: decodeInlineDataUrl,
         jsonPath: jsonPath,
         resolveUrl: resolveUrl,
         splitUrlOption: splitUrlOption
