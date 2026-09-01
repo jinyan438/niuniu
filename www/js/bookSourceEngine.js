@@ -985,7 +985,11 @@
         var library = context.source && context.source.jsLib || '';
         var libraryNames = this.libraryFunctionNames(library);
         var expose = libraryNames.map(function(name) {
-            return 'try { this[' + JSON.stringify(name) + '] = ' + name + '; } catch (__exposeError) {}';
+            // Bind library helpers to this rule's runtime object. Without the
+            // bind, a bare helper call receives the shared window as `this`,
+            // so overlapping downloads and searches can overwrite each
+            // other's source/cookie bindings.
+            return 'try { if (typeof ' + name + ' === "function") ' + name + ' = ' + name + '.bind(this); this[' + JSON.stringify(name) + '] = ' + name + '; } catch (__exposeError) {}';
         }).join('\n');
         var AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
         var transformed = addImplicitAsyncRuleReturn(rewriteAsyncJavaCalls(script));
@@ -1009,9 +1013,13 @@
             throw new Error('JS 规则执行失败: ' + error.message);
         }
         try {
-            return await this.withRuntimeGlobalsAsync(b, function() {
-                return runner.apply(root, values);
-            }, libraryNames);
+            // Keep async rules isolated from the global object. The runner's
+            // parameters already contain all runtime bindings; the object is
+            // only needed as the receiver for source-library helpers and
+            // `this.*` calls.
+            var runtimeThis = Object.create(root || null);
+            Object.keys(b).forEach(function(name) { runtimeThis[name] = b[name]; });
+            return await runner.apply(runtimeThis, values);
         } catch (error) {
             throw new Error('JS 异步规则执行失败: ' + error.message);
         }

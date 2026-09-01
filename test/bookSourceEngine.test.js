@@ -327,6 +327,26 @@ test('returns Legado URL variables assigned inside conditional JS rules', async 
     assert.equal(await engine.extractStringAsync(context.result, rule, context, true), 'data:text/plain,正文');
 });
 
+test('isolates concurrent asynchronous source rules', async () => {
+    const engine = new BookSourceEngine();
+    const sourceA = normalizeSource({
+        bookSourceUrl: 'https://isolated-a.test',
+        bookSourceName: 'Isolated A',
+        jsLib: 'function readSourceValue() { return this.source.getVariable(); }'
+    });
+    const sourceB = normalizeSource({
+        bookSourceUrl: 'https://isolated-b.test',
+        bookSourceName: 'Isolated B',
+        jsLib: 'function readSourceValue() { return this.source.getVariable(); }'
+    });
+    engine.variableMap(sourceA).set('__source_variable', 'A');
+    engine.variableMap(sourceB).set('__source_variable', 'B');
+    const rule = '<js>await new Promise((resolve) => setTimeout(resolve, result.delay)); readSourceValue()</js>';
+    const run = (source, delay) => engine.evalJsAsync(rule, { source, result: { delay }, src: { delay }, baseUrl: source.bookSourceUrl });
+
+    assert.deepEqual(await Promise.all([run(sourceA, 1), run(sourceB, 10)]), ['A', 'B']);
+});
+
 test('reports each chapter as soon as background downloading completes', async () => {
     const source = normalizeSource({ bookSourceUrl: 'https://progress.test', bookSourceName: 'Progress Test' });
     const engine = new BookSourceEngine({
