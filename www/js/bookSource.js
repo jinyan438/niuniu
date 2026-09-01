@@ -796,7 +796,8 @@
         }
     }
 
-    async function resolveShelfOnlineBook(bookMeta, refreshToc) {
+    async function resolveShelfOnlineBook(bookMeta, refreshToc, sourceEngine) {
+        sourceEngine = sourceEngine || engine;
         var online = bookMeta && bookMeta.onlineSource;
         if (!online) throw new Error('这不是网络书源书籍');
         var source = sourceByUrl(online.sourceUrl);
@@ -815,8 +816,20 @@
         var chapters = Array.isArray(online.chapters) ? snapshotOnlineChapters(online.chapters) : [];
         if (refreshToc || !chapters.length) {
             try {
-                book = await engine.bookInfo(source, book);
-                chapters = await engine.toc(source, book);
+                // Saved online books already contain their resolved TOC URL.
+                // Checking that URL directly avoids an unnecessary detail
+                // request immediately before the user returns to search.
+                var refreshedBookInfo = !book.tocUrl || !chapters.length;
+                if (refreshedBookInfo) book = await sourceEngine.bookInfo(source, book);
+                try {
+                    chapters = await sourceEngine.toc(source, book);
+                } catch (tocError) {
+                    // A stale TOC URL may need one detail refresh before the
+                    // source can expose its new directory endpoint.
+                    if (refreshedBookInfo) throw tocError;
+                    book = await sourceEngine.bookInfo(source, book);
+                    chapters = await sourceEngine.toc(source, book);
+                }
             } catch (error) {
                 // A temporary source failure should not erase a usable saved
                 // directory.  Incremental download can continue from it and
@@ -900,7 +913,16 @@
             });
             var existingBook = await NR.storageDB.loadBook(bookName);
             var existingText = existingBook && typeof existingBook.content === 'string' ? existingBook.content : '';
-            var resolved = await resolveShelfOnlineBook(bookMeta, true);
+            var sourceForDownload = sourceByUrl(bookMeta.onlineSource.sourceUrl);
+            if (!sourceForDownload) {
+                await loadSources();
+                sourceForDownload = sourceByUrl(bookMeta.onlineSource.sourceUrl);
+            }
+            if (!sourceForDownload) throw new Error('找不到对应书源，请先确认书源仍在书源管理中');
+            // Directory/content rules use mutable java.put/source variables.
+            // Run the update check on a copy so search keeps its warm state.
+            var downloadEngine = engine.forkForSource(sourceForDownload);
+            var resolved = await resolveShelfOnlineBook(bookMeta, true, downloadEngine);
             var source = resolved.source;
             var book = resolved.book;
             var chapters = resolved.chapters;
@@ -956,7 +978,7 @@
             el['source-download-progress'].style.width = '0%';
             el['source-download-status'].textContent = '发现 ' + pendingChapters.length + ' 个未缓存章节，准备下载《' + (book.name || bookMeta.name) + '》';
             var failedCount = 0;
-            var content = await engine.downloadBook(source, book, pendingChapters, {
+            var content = await downloadEngine.downloadBook(source, book, pendingChapters, {
                 // One chapter at a time keeps the progress bar responsive and
                 // avoids piling up synchronous java.ajax calls from Legado rules.
                 concurrency: 1,

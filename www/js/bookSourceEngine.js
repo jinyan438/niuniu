@@ -634,6 +634,20 @@
         return this.variables.get(key);
     };
 
+    BookSourceEngine.prototype.forkForSource = function(source) {
+        var fork = new BookSourceEngine({
+            transport: this.transport,
+            maxTocPages: this.maxTocPages,
+            maxContentPages: this.maxContentPages
+        });
+        var key = source && source.bookSourceUrl;
+        if (key && this.variables.has(key)) fork.variables.set(key, new Map(this.variables.get(key)));
+        // Native cookies already live in the shared Android bridge. Keep the
+        // in-browser fallback cookie store shared for the same semantics.
+        fork.cookies = this.cookies;
+        return fork;
+    };
+
     BookSourceEngine.prototype.scriptBindings = function(context) {
         var self = this;
         var sourceData = context.source || {};

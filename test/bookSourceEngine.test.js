@@ -389,6 +389,22 @@ test('preserves source defaults when an async rule initializes empty variables',
     });
 });
 
+test('forks source runtime state without changing the search engine state', () => {
+    const engine = new BookSourceEngine();
+    const source = normalizeSource({ bookSourceUrl: 'https://forked-source.test', bookSourceName: 'Forked Source' });
+    engine.variableMap(source).set('__source_variable', '{"server":"primary","tab":"novel"}');
+    engine.variableMap(source).set('search_session', 'warm');
+
+    const fork = engine.forkForSource(source);
+    fork.variableMap(source).set('__source_variable', '{"server":"fallback","tab":"novel"}');
+    fork.variableMap(source).set('book_id', 'download-only');
+
+    assert.equal(engine.variableMap(source).get('__source_variable'), '{"server":"primary","tab":"novel"}');
+    assert.equal(engine.variableMap(source).get('search_session'), 'warm');
+    assert.equal(engine.variableMap(source).has('book_id'), false);
+    assert.equal(fork.transport, engine.transport);
+});
+
 test('reports each chapter as soon as background downloading completes', async () => {
     const source = normalizeSource({ bookSourceUrl: 'https://progress.test', bookSourceName: 'Progress Test' });
     const engine = new BookSourceEngine({
