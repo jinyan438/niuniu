@@ -15329,10 +15329,10 @@ body.theme-eink .book-source-view {
 .source-download-body p { min-height: 40px; margin: 12px 0; font-size: 13px; overflow-wrap: anywhere; }
 
 .source-toast {
-    position: absolute;
+    position: fixed;
     left: 50%;
     bottom: 74px;
-    z-index: 50;
+    z-index: 2000;
     max-width: calc(100% - 40px);
     padding: 10px 14px;
     border-radius: 4px;
