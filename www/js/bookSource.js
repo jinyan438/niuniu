@@ -853,8 +853,11 @@
             // Let the WebView paint the modal before a source rule starts a
             // potentially synchronous java.ajax request.
             await new Promise(function(resolve) {
-                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
-                else setTimeout(resolve, 0);
+                // A timeout after the frame callback lets the WebView commit
+                // the modal to screen before the first synchronous source
+                // request starts.
+                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(function() { setTimeout(resolve, 50); });
+                else setTimeout(resolve, 50);
             });
             var resolved = await resolveShelfOnlineBook(bookMeta);
             var source = resolved.source;
@@ -871,6 +874,7 @@
                 concurrency: 1,
                 signal: controller && controller.signal,
                 continueOnError: true,
+                yieldToUi: true,
                 onChapter: function(index, text) {
                     if (/\[本章加载失败：/.test(String(text || ''))) {
                         failedCount++;

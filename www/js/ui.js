@@ -190,6 +190,31 @@
             if (downloadBtn) actionsEl.appendChild(downloadBtn);
             actionsEl.appendChild(deleteBtn);
             bookEl.appendChild(actionsEl);
+            // Bind the most important actions directly on the button as well
+            // as through the grid delegate. This is reliable on Android
+            // WebView builds that do not dispatch a click after a touch on a
+            // selectable flex row.
+            [tagBtn, downloadBtn, deleteBtn].filter(Boolean).forEach(function(button) {
+                button.addEventListener('touchstart', function(event) {
+                    event.stopPropagation();
+                }, { passive: true });
+                button.addEventListener('pointerdown', function(event) {
+                    event.stopPropagation();
+                });
+            });
+            if (downloadBtn) {
+                var startDownload = function(event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    var now = Date.now();
+                    if (NR.state.lastShelfDownloadName === book.name && now - (NR.state.lastShelfDownloadAt || 0) < 700) return;
+                    NR.state.lastShelfDownloadName = book.name;
+                    NR.state.lastShelfDownloadAt = now;
+                    if (typeof NR.downloadOnlineBookFromShelf === 'function') NR.downloadOnlineBookFromShelf(book.name);
+                };
+                downloadBtn.addEventListener('touchend', startDownload, { passive: false });
+                downloadBtn.addEventListener('click', startDownload);
+            }
             NR.els['bookshelf-grid'].appendChild(bookEl);
         });
     };

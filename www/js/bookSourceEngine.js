@@ -269,12 +269,25 @@
         var id = 'bookSource_' + Date.now().toString(36) + '_' + (++nativeRequestSequence);
         var timeout = Math.max(5000, Number(options.timeout || 30000) + 5000);
         return new Promise(function(resolve, reject) {
+            var settled = false;
+            var abort = function() {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                delete registry.__bookSourceRequestCallbacks[id];
+                reject(new Error('下载已取消'));
+            };
             var timer = setTimeout(function() {
+                if (settled) return;
+                settled = true;
                 delete registry.__bookSourceRequestCallbacks[id];
                 reject(new Error('请求超时'));
             }, timeout);
             registry.__bookSourceRequestCallbacks[id] = function(nativeResult) {
+                if (settled) return;
+                settled = true;
                 clearTimeout(timer);
+                if (options.signal && options.signal.removeEventListener) options.signal.removeEventListener('abort', abort);
                 try {
                     var parsed = typeof nativeResult === 'string' ? JSON.parse(nativeResult) : nativeResult;
                     if (parsed && parsed.error) reject(new Error(parsed.error));
@@ -283,13 +296,16 @@
                     reject(error);
                 }
             };
+            if (options.signal && options.signal.addEventListener) options.signal.addEventListener('abort', abort, { once: true });
             try {
                 bridge.requestAsync(JSON.stringify(options), id);
             } catch (error) {
                 clearTimeout(timer);
                 delete registry.__bookSourceRequestCallbacks[id];
+                if (options.signal && options.signal.removeEventListener) options.signal.removeEventListener('abort', abort);
                 reject(error);
             }
+            if (options.signal && options.signal.aborted) abort();
         });
     }
 
@@ -539,6 +555,8 @@
         var self = this;
         var sourceData = context.source || {};
         var variables = this.variableMap(sourceData);
+        var asyncMode = !!context.asyncMode;
+        var originalSourceVariable = variables.get('__source_variable');
         var cookie = {
             getCookie: function(url) {
                 if (root.NiuniuBookSource && typeof root.NiuniuBookSource.getCookie === 'function') return root.NiuniuBookSource.getCookie(asString(url));
@@ -563,8 +581,37 @@
         var source = Object.assign({}, sourceData, {
             get: function(key) { return variables.get(String(key)); },
             put: function(key, value) { variables.set(String(key), value); return value; },
-            getVariable: function() { return variables.get('__source_variable') || ''; },
-            setVariable: function(value) { variables.set('__source_variable', value); },
+            getVariable: function() {
+                var value = variables.get('__source_variable') || '';
+                // Optional paragraph/community decorations in large Legado
+                // sources perform extra synchronous requests.  They are not
+                // part of the chapter text and would defeat lazy loading, so
+                // turn them off while an async reader request is running.
+                if (asyncMode) {
+                    try {
+                        var parsed = typeof value === 'string' && value ? parseLooseJson(value) : (value || {});
+                        if (parsed && typeof parsed === 'object') {
+                            parsed = Object.assign({}, parsed, { fqcommunity: 'off', fqpara: 'off' });
+                            return JSON.stringify(parsed);
+                        }
+                    } catch (e) { /* preserve non-JSON source variables */ }
+                }
+                return value;
+            },
+            setVariable: function(value) {
+                if (asyncMode) {
+                    try {
+                        var next = typeof value === 'string' && value ? parseLooseJson(value) : value;
+                        var previous = typeof originalSourceVariable === 'string' && originalSourceVariable ? parseLooseJson(originalSourceVariable) : originalSourceVariable;
+                        if (next && typeof next === 'object' && previous && typeof previous === 'object') {
+                            if (previous.fqcommunity !== undefined) next.fqcommunity = previous.fqcommunity;
+                            if (previous.fqpara !== undefined) next.fqpara = previous.fqpara;
+                            value = JSON.stringify(next);
+                        }
+                    } catch (e) { /* preserve non-JSON variables */ }
+                }
+                variables.set('__source_variable', value);
+            },
             getLoginInfo: function() { return variables.get('__login_info') || ''; },
             putLoginInfo: function(value) { variables.set('__login_info', value); return value; },
             getLoginInfoMap: function() {
@@ -603,18 +650,35 @@
             get: function(key) { return variables.get(String(key)); },
             put: function(key, value) { variables.set(String(key), value); return value; },
             ajax: function(url) { return self.transport.requestSync(self.prepareRequest(url, context)).body; },
+            // Async counterparts are used by the reader/download path.  The
+            // legacy methods above intentionally stay synchronous because a
+            // number of imported sources rely on that contract.
+            ajaxAsync: async function(url) { return (await self.transport.request(self.prepareRequest(url, context))).body; },
             connect: function(url, headers) {
                 var request = self.prepareRequest(url, context);
                 request.headers = Object.assign(request.headers, parseHeaders(headers));
                 return responseWrapper(self.transport.requestSync(request));
+            },
+            connectAsync: async function(url, headers) {
+                var request = self.prepareRequest(url, context);
+                request.headers = Object.assign(request.headers, parseHeaders(headers));
+                return responseWrapper(await self.transport.request(request));
             },
             getString: function(url, headers) {
                 var request = self.prepareRequest(url, context);
                 request.headers = Object.assign(request.headers, parseHeaders(headers));
                 return self.transport.requestSync(request).body;
             },
+            getStringAsync: async function(url, headers) {
+                var request = self.prepareRequest(url, context);
+                request.headers = Object.assign(request.headers, parseHeaders(headers));
+                return (await self.transport.request(request)).body;
+            },
             post: function(url, body, headers) {
                 return responseWrapper(self.transport.requestSync({ url: resolveUrl(url, context.baseUrl || sourceData.bookSourceUrl), method: 'POST', body: asString(body), headers: parseHeaders(headers) }));
+            },
+            postAsync: async function(url, body, headers) {
+                return responseWrapper(await self.transport.request({ url: resolveUrl(url, context.baseUrl || sourceData.bookSourceUrl), method: 'POST', body: asString(body), headers: parseHeaders(headers) }));
             },
             getCookie: function(url) { return cookie.getCookie(url); },
             getWebViewUA: function() { return DEFAULT_UA; },
@@ -727,6 +791,30 @@
         }
     };
 
+    // Runtime globals such as `java` are also exposed through `this` for a
+    // number of Legado libraries.  Keep them installed until an async rule has
+    // fully settled; the synchronous helper above restores them immediately.
+    BookSourceEngine.prototype.withRuntimeGlobalsAsync = async function(bindings, action, extraNames) {
+        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
+        var names = runtimeNames.concat(extraNames || []).filter(function(name, index, all) { return all.indexOf(name) === index; });
+        var previous = {};
+        var existed = {};
+        names.forEach(function(name) {
+            existed[name] = Object.prototype.hasOwnProperty.call(root, name);
+            previous[name] = root[name];
+            if (runtimeNames.indexOf(name) >= 0) root[name] = bindings[name];
+        });
+        try { return await action(); }
+        finally {
+            names.forEach(function(name) {
+                if (existed[name]) root[name] = previous[name];
+                else {
+                    try { delete root[name]; } catch (e) { root[name] = undefined; }
+                }
+            });
+        }
+    };
+
     BookSourceEngine.prototype.evalJs = function(code, context) {
         var script = asString(code).trim()
             .replace(/^@js:/i, '')
@@ -754,6 +842,87 @@
             } catch (secondError) {
                 throw new Error('JS 规则执行失败: ' + secondError.message);
             }
+        }
+    };
+
+    function rewriteAsyncJavaCalls(script) {
+        // Imported Legado scripts normally issue these calls at top level.  A
+        // direct `await` keeps their original return-value semantics while the
+        // native transport runs off the WebView thread.
+        return script
+            .replace(/\bjava\.ajax\s*\(/g, 'await java.ajaxAsync(')
+            .replace(/\bjava\.connect\s*\(/g, 'await java.connectAsync(')
+            .replace(/\bjava\.getString\s*\(/g, 'await java.getStringAsync(')
+            .replace(/\bjava\.post\s*\(/g, 'await java.postAsync(');
+    }
+
+    function addImplicitAsyncRuleReturn(script) {
+        var text = asString(script).trim();
+        if (!text || /(?:^|[;\n])\s*return\b/.test(text.slice(Math.max(0, text.length - 160)))) return text;
+        // Find the last top-level statement boundary without splitting on
+        // semicolons/newlines inside strings or nested expressions.
+        var quote = '';
+        var escaped = false;
+        var round = 0;
+        var square = 0;
+        var curly = 0;
+        var boundary = -1;
+        for (var i = 0; i < text.length; i++) {
+            var ch = text[i];
+            if (quote) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === quote) quote = '';
+                continue;
+            }
+            if (ch === '"' || ch === "'") { quote = ch; continue; }
+            if (ch === '(') round++;
+            else if (ch === ')') round = Math.max(0, round - 1);
+            else if (ch === '[') square++;
+            else if (ch === ']') square = Math.max(0, square - 1);
+            else if (ch === '{') curly++;
+            else if (ch === '}') curly = Math.max(0, curly - 1);
+            else if ((ch === ';' || ch === '\n') && round === 0 && square === 0 && curly === 0) boundary = i;
+        }
+        var tailStart = boundary + 1;
+        var tail = text.slice(tailStart).trim().replace(/;\s*$/, '').trim();
+        if (!tail || /^(?:var|let|const|if|for|while|try|catch|finally|switch|function|class|return|throw|break|continue)\b/.test(tail)) return text;
+        return text.slice(0, tailStart) + 'return ' + tail + ';';
+    }
+
+    BookSourceEngine.prototype.evalJsAsync = async function(code, context) {
+        var script = asString(code).trim()
+            .replace(/^@js:/i, '')
+            .replace(/^<js>/i, '')
+            .replace(/<\/js>$/i, '');
+        if (!script) return context.result;
+        var b = this.scriptBindings(Object.assign({}, context, { asyncMode: true }));
+        var names = Object.keys(b);
+        var values = names.map(function(name) { return b[name]; });
+        var library = context.source && context.source.jsLib || '';
+        var libraryNames = this.libraryFunctionNames(library);
+        var expose = libraryNames.map(function(name) {
+            return 'try { this[' + JSON.stringify(name) + '] = ' + name + '; } catch (__exposeError) {}';
+        }).join('\n');
+        var AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        var transformed = addImplicitAsyncRuleReturn(rewriteAsyncJavaCalls(script));
+        // Most declarative JS rules leave their result in `data` or mutate the
+        // supplied `result` binding.  Returning those values also covers rules
+        // whose final expression is a bare statement (the common Legado form).
+        var body = asString(library) + '\n' + expose + '\n' + transformed +
+            '\n;return typeof data !== "undefined" ? data : (typeof result !== "undefined" ? result : "");';
+        var runner;
+        try {
+            runner = AsyncFunction.apply(null, names.concat(body));
+        } catch (error) {
+            throw new Error('JS 规则执行失败: ' + error.message);
+        }
+        try {
+            return await this.withRuntimeGlobalsAsync(b, function() {
+                return runner.apply(root, values);
+            }, libraryNames);
+        } catch (error) {
+            throw new Error('JS 异步规则执行失败: ' + error.message);
         }
     };
 
@@ -866,6 +1035,7 @@
 
     BookSourceEngine.prototype.fetch = async function(ruleUrl, context) {
         var request = this.prepareRequest(ruleUrl, context);
+        if (context && context.signal) request.signal = context.signal;
         var response = await this.transport.request(request);
         if (response.status && (response.status < 200 || response.status >= 400)) throw new Error('HTTP ' + response.status);
         if (splitUrlOption(this.interpolate(ruleUrl, context)).option.bodyJs) {
@@ -957,9 +1127,84 @@
         return extracted;
     };
 
+    // Async equivalent used for chapter rules.  It mirrors the declarative
+    // extractor but awaits JS snippets so `java.ajax` can use requestAsync.
+    BookSourceEngine.prototype.extractAsync = async function(value, rule, context, listMode) {
+        context = Object.assign({}, context || {});
+        var text = asString(rule).trim();
+        if (!text) return listMode ? (Array.isArray(value) ? value : [value]) : value;
+
+        var getMatch = text.match(/^@get:\{([^}]+)\}$/i);
+        if (getMatch) return this.variableMap(context.source || {}).get(getMatch[1]) || '';
+
+        var chainedJs = text.match(/^<js>([\s\S]*?)<\/js>([\s\S]*)$/i);
+        if (chainedJs) {
+            var jsValue = await this.evalJsAsync('<js>' + chainedJs[1] + '</js>', Object.assign({}, context, { result: value, src: value }));
+            var trailingRule = chainedJs[2].trim();
+            return trailingRule
+                ? this.extractAsync(jsValue, trailingRule, Object.assign({}, context, { result: jsValue, src: jsValue }), listMode)
+                : jsValue;
+        }
+        if (/^@js:/i.test(text)) return this.evalJsAsync(text, Object.assign({}, context, { result: value, src: value }));
+
+        if (!listMode && /\{\{[\s\S]*?\}\}/.test(text)) {
+            return this.interpolate(text, Object.assign({}, context, { result: value, src: value }));
+        }
+
+        var alternatives = splitOutside(text, '||');
+        if (alternatives.length > 1) {
+            for (var a = 0; a < alternatives.length; a++) {
+                try {
+                    var alternative = await this.extractAsync(value, alternatives[a], context, listMode);
+                    if (Array.isArray(alternative) ? alternative.length : asString(alternative).trim()) return alternative;
+                } catch (e) { /* try next rule */ }
+            }
+            return listMode ? [] : '';
+        }
+
+        var joins = splitOutside(text, '&&');
+        if (joins.length > 1 && !listMode) {
+            var joined = [];
+            for (var j = 0; j < joins.length; j++) joined.push(asString(await this.extractAsync(value, joins[j], context, false)));
+            return joined.join('');
+        }
+        if (joins.length > 1 && listMode) {
+            var all = [];
+            for (var k = 0; k < joins.length; k++) {
+                var parsedJoin = await this.extractAsync(value, joins[k], context, true);
+                all = all.concat(Array.isArray(parsedJoin) ? parsedJoin : [parsedJoin]);
+            }
+            return all;
+        }
+
+        var jsIndex = text.search(/@js:|<js>/i);
+        var mainRule = jsIndex >= 0 ? text.slice(0, jsIndex) : text;
+        var jsRule = jsIndex >= 0 ? text.slice(jsIndex) : '';
+        var replaceParts = splitOutside(mainRule, '##');
+        mainRule = replaceParts.shift();
+        var extracted = this.extractBasic(value, mainRule, listMode);
+        if (!listMode && Array.isArray(extracted)) extracted = extracted.length <= 1 ? extracted[0] : extracted.map(asString).join('\n');
+        if (replaceParts.length) {
+            var replaceValue = replaceParts.length > 1 ? replaceParts[1] : '';
+            try { extracted = asString(extracted).replace(new RegExp(replaceParts[0], 'g'), replaceValue); } catch (e) { /* invalid replacement is ignored */ }
+        }
+        var putMatch = text.match(/@put:\{([^}]+)\}/i);
+        if (putMatch) this.variableMap(context.source || {}).set(putMatch[1], extracted);
+        if (jsRule) extracted = await this.evalJsAsync(jsRule, Object.assign({}, context, { result: extracted, src: value }));
+        return extracted;
+    };
+
     BookSourceEngine.prototype.extractString = function(value, rule, context, isUrl) {
         if (rule === null || rule === undefined || asString(rule).trim() === '') return '';
         var output = this.extract(value, rule, context, false);
+        if (Array.isArray(output)) output = output.map(asString).join('\n');
+        output = asString(output).trim();
+        return isUrl ? resolveUrl(output, context.baseUrl || context.redirectUrl || context.source.bookSourceUrl) : output;
+    };
+
+    BookSourceEngine.prototype.extractStringAsync = async function(value, rule, context, isUrl) {
+        if (rule === null || rule === undefined || asString(rule).trim() === '') return '';
+        var output = await this.extractAsync(value, rule, context, false);
         if (Array.isArray(output)) output = output.map(asString).join('\n');
         output = asString(output).trim();
         return isUrl ? resolveUrl(output, context.baseUrl || context.redirectUrl || context.source.bookSourceUrl) : output;
@@ -1038,16 +1283,17 @@
         var context = { source: source, book: book, baseUrl: book.bookUrl };
         var response = await this.fetch(book.bookUrl, context);
         var body = this.parseBody(response.body);
-        if (rule.init) body = this.extract(body, rule.init, Object.assign({}, context, { baseUrl: response.url }), false);
-        var self = this;
+        if (rule.init) body = await this.extractAsync(body, rule.init, Object.assign({}, context, { baseUrl: response.url }), false);
         var infoContext = Object.assign({}, context, { result: body, src: body, baseUrl: response.url, redirectUrl: response.url });
         var output = Object.assign({}, book);
-        ['name', 'author', 'intro', 'kind', 'lastChapter', 'updateTime', 'wordCount'].forEach(function(field) {
-            var parsed = self.extractString(body, rule[field], infoContext, false);
-            if (parsed) output[field] = parsed;
-        });
-        var cover = this.extractString(body, rule.coverUrl, infoContext, true);
-        var toc = this.extractString(body, rule.tocUrl, infoContext, true);
+        var infoFields = ['name', 'author', 'intro', 'kind', 'lastChapter', 'updateTime', 'wordCount'];
+        for (var fieldIndex = 0; fieldIndex < infoFields.length; fieldIndex++) {
+            var fieldName = infoFields[fieldIndex];
+            var parsed = await this.extractStringAsync(body, rule[fieldName], infoContext, false);
+            if (parsed) output[fieldName] = parsed;
+        }
+        var cover = await this.extractStringAsync(body, rule.coverUrl, infoContext, true);
+        var toc = await this.extractStringAsync(body, rule.tocUrl, infoContext, true);
         if (cover) output.coverUrl = cover;
         output.tocUrl = toc || output.tocUrl || response.url || book.bookUrl;
         output.bookUrl = book.bookUrl;
@@ -1076,17 +1322,18 @@
             var listRule = asString(rule.chapterList || '');
             var reverseList = listRule.charAt(0) === '-';
             if (listRule.charAt(0) === '-' || listRule.charAt(0) === '+') listRule = listRule.slice(1);
-            var items = this.extract(body, listRule, listContext, true);
+            var items = await this.extractAsync(body, listRule, listContext, true);
             if (!Array.isArray(items)) items = [items];
             if (reverseList) items.reverse();
             for (var i = 0; i < items.length; i++) {
                 var itemContext = Object.assign({}, listContext, { result: items[i], src: items[i], chapter: { index: chapters.length } });
-                var title = this.extractString(items[i], rule.chapterName, itemContext, false);
-                var url = this.extractString(items[i], rule.chapterUrl, itemContext, true) || response.url;
-                if (title) chapters.push({ title: title, url: url, index: chapters.length, isVolume: /^(true|1|yes)$/i.test(this.extractString(items[i], rule.isVolume, itemContext, false)) });
+                var title = await this.extractStringAsync(items[i], rule.chapterName, itemContext, false);
+                var url = await this.extractStringAsync(items[i], rule.chapterUrl, itemContext, true) || response.url;
+                var volumeValue = await this.extractStringAsync(items[i], rule.isVolume, itemContext, false);
+                if (title) chapters.push({ title: title, url: url, index: chapters.length, isVolume: /^(true|1|yes)$/i.test(volumeValue) });
             }
             if (onProgress) onProgress(chapters.length, page);
-            var parsedNext = rule.nextTocUrl ? this.extract(body, rule.nextTocUrl, listContext, true) : '';
+            var parsedNext = rule.nextTocUrl ? await this.extractAsync(body, rule.nextTocUrl, listContext, true) : '';
             if (Array.isArray(parsedNext)) parsedNext = parsedNext[0];
             nextUrl = resolveUrl(asString(parsedNext), response.url);
             page++;
@@ -1118,7 +1365,8 @@
         return output;
     }
 
-    BookSourceEngine.prototype.chapterContent = async function(source, book, chapter) {
+    BookSourceEngine.prototype.chapterContent = async function(source, book, chapter, options) {
+        options = options || {};
         if (source.mainJs) {
             var jsContent = await this.callMainJs(source, 'getContent', [chapter, book, null], { book: book, chapter: chapter });
             return htmlToText(asString(jsContent)).trim();
@@ -1130,17 +1378,19 @@
         var page = 1;
         while (nextUrl && !visited.has(nextUrl) && page <= this.maxContentPages) {
             visited.add(nextUrl);
-            var context = { source: source, book: book, chapter: chapter, page: page, baseUrl: nextUrl };
+            var context = { source: source, book: book, chapter: chapter, page: page, baseUrl: nextUrl, signal: options.signal };
             var response = await this.fetch(nextUrl, context);
             var body = this.parseBody(response.body);
             var contentContext = Object.assign({}, context, { baseUrl: response.url, redirectUrl: response.url, result: body, src: body });
-            var content = this.extractString(body, rule.content || '', contentContext, false);
-            var subContent = this.extractString(body, rule.subContent || '', contentContext, false);
+            var contentValue = rule.content ? await this.extractAsync(body, rule.content, contentContext, false) : '';
+            var subContentValue = rule.subContent ? await this.extractAsync(body, rule.subContent, contentContext, false) : '';
+            var content = Array.isArray(contentValue) ? contentValue.map(asString).join('\n') : asString(contentValue).trim();
+            var subContent = Array.isArray(subContentValue) ? subContentValue.map(asString).join('\n') : asString(subContentValue).trim();
             content = htmlToText(content);
             if (subContent) content += '\n' + htmlToText(subContent);
             if (rule.replaceRegex) content = applyReplaceRule(content, rule.replaceRegex);
             if (content.trim()) parts.push(content.trim());
-            var parsedNext = rule.nextContentUrl ? this.extract(body, rule.nextContentUrl, contentContext, true) : '';
+            var parsedNext = rule.nextContentUrl ? await this.extractAsync(body, rule.nextContentUrl, contentContext, true) : '';
             if (Array.isArray(parsedNext)) parsedNext = parsedNext[0];
             nextUrl = resolveUrl(asString(parsedNext), response.url);
             page++;
@@ -1164,7 +1414,7 @@
                     if (chapter.isVolume) {
                         results[index] = chapter.title;
                     } else {
-                        var content = await self.chapterContent(source, book, chapter);
+                        var content = await self.chapterContent(source, book, chapter, { signal: options.signal });
                         results[index] = chapter.title + '\n\n' + (content || '[本章暂无可用正文]');
                     }
                 } catch (error) {
@@ -1174,6 +1424,13 @@
                 completed++;
                 if (options.onChapter) options.onChapter(index, results[index], chapter, completed, chapters.length);
                 if (options.onProgress) options.onProgress(completed, chapters.length, chapter.title);
+                // Legado sources may execute synchronous java.ajax calls. Yield
+                // to the browser between chapters so progress updates paint
+                // and the cancel button remains responsive during full-book
+                // downloads.
+                if (options.yieldToUi !== false) {
+                    await new Promise(function(resolve) { setTimeout(resolve, 0); });
+                }
             }
         }
         await Promise.all(Array.from({ length: Math.min(concurrency, chapters.length || 1) }, worker));

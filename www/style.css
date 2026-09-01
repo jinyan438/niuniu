@@ -106,6 +106,9 @@ body.theme-eink::after {
     transition: background-color 0.2s;
     justify-self: stretch;
     box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
 }
 
 .book-item:hover {
@@ -178,6 +181,7 @@ body.theme-eink::after {
     user-select: none;
     -webkit-user-select: none;
     touch-action: manipulation;
+    pointer-events: auto;
 }
 
 .book-item .delete-book-btn-on-shelf,
@@ -14971,6 +14975,8 @@ body.theme-eink .book-source-view {
     cursor: pointer;
     flex: 0 0 38px;
     font-size: 16px;
+    touch-action: manipulation;
+    pointer-events: auto;
 }
 
 .source-icon-button:hover,

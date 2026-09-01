@@ -233,6 +233,39 @@ test('uses the asynchronous native transport when available', async () => {
     }
 });
 
+test('executes chapter JS ajax rules without blocking on the sync transport', async () => {
+    const source = normalizeSource({
+        bookSourceUrl: 'https://async-rule.test',
+        bookSourceName: 'Async Rule Test',
+        ruleContent: {
+            content: '<js>var data = java.ajax("https://async-rule.test/content"); data;</js>$.content'
+        }
+    });
+    const calls = [];
+    const engine = new BookSourceEngine({
+        transport: {
+            async request(options) {
+                calls.push(options.url);
+                return { status: 200, url: options.url, headers: {}, body: JSON.stringify({ content: '异步正文' }) };
+            },
+            requestSync() {
+                throw new Error('chapter rule used synchronous transport');
+            }
+        }
+    });
+
+    const content = await engine.chapterContent(source, { bookUrl: source.bookSourceUrl }, {
+        title: '第一章',
+        url: source.bookSourceUrl + '/chapter/1',
+        index: 0
+    });
+    assert.equal(content, '异步正文');
+    assert.deepEqual(calls, [
+        'https://async-rule.test/chapter/1',
+        'https://async-rule.test/content'
+    ]);
+});
+
 test('reports each chapter as soon as background downloading completes', async () => {
     const source = normalizeSource({ bookSourceUrl: 'https://progress.test', bookSourceName: 'Progress Test' });
     const engine = new BookSourceEngine({

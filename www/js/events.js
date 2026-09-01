@@ -238,12 +238,16 @@
             var isTagButton = capturedButton && capturedButton.classList.contains('tag-book-btn');
             if (capturedButton && (isDownloadButton || isTagButton)) {
                 event.preventDefault();
-                if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-                else event.stopPropagation();
+                event.stopPropagation();
                 var capturedBook = capturedButton.closest('.book-item');
                 var capturedName = capturedBook && capturedBook.dataset.bookName;
                 if (capturedName && isDownloadButton && typeof NR.downloadOnlineBookFromShelf === 'function') {
-                    NR.downloadOnlineBookFromShelf(capturedName);
+                    var clickNow = Date.now();
+                    if (NR.state.lastShelfDownloadName !== capturedName || clickNow - (NR.state.lastShelfDownloadAt || 0) >= 700) {
+                        NR.state.lastShelfDownloadName = capturedName;
+                        NR.state.lastShelfDownloadAt = clickNow;
+                        NR.downloadOnlineBookFromShelf(capturedName);
+                    }
                 } else if (capturedName && capturedButton.classList.contains('tag-book-btn')) {
                     NR.openTagEditModal(capturedName);
                 }
@@ -268,7 +272,14 @@
                 NR.openTagEditModal(bookName);
             } else if (target.closest('.download-book-btn-on-shelf')) {
                 event.stopPropagation();
-                if (typeof NR.downloadOnlineBookFromShelf === 'function') NR.downloadOnlineBookFromShelf(bookName);
+                if (typeof NR.downloadOnlineBookFromShelf === 'function') {
+                    var bubbleNow = Date.now();
+                    if (NR.state.lastShelfDownloadName !== bookName || bubbleNow - (NR.state.lastShelfDownloadAt || 0) >= 700) {
+                        NR.state.lastShelfDownloadName = bookName;
+                        NR.state.lastShelfDownloadAt = bubbleNow;
+                        NR.downloadOnlineBookFromShelf(bookName);
+                    }
+                }
             } else if (target.closest('.delete-book-btn-on-shelf')) {
                 event.stopPropagation();
                 if (confirm('确定要从书架删除《' + bookName + '》吗？\n\n这将一并删除该书内容、阅读进度、AI数据库全部数据、人物图片和生图资源。此操作无法撤销。')) {
@@ -313,7 +324,27 @@
             } else {
                 NR.loadBookFromShelf(bookName);
             }
-        }, true);
+        });
+
+        function handleShelfDownloadGesture(event) {
+            var button = event.target && event.target.closest ? event.target.closest('.download-book-btn-on-shelf') : null;
+            if (!button) return;
+            var book = button.closest('.book-item');
+            var name = book && book.dataset.bookName;
+            if (!name || typeof NR.downloadOnlineBookFromShelf !== 'function') return;
+            event.preventDefault();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+            else event.stopPropagation();
+            var now = Date.now();
+            if (NR.state.lastShelfDownloadName === name && now - (NR.state.lastShelfDownloadAt || 0) < 700) return;
+            NR.state.lastShelfDownloadName = name;
+            NR.state.lastShelfDownloadAt = now;
+            NR.downloadOnlineBookFromShelf(name);
+        }
+        // Some Android WebViews suppress click after a touch on a selectable
+        // flex row. Handle the end of the touch/pointer gesture as a fallback.
+        NR.els['bookshelf-grid'].addEventListener('touchend', handleShelfDownloadGesture, { capture: true, passive: false });
+        NR.els['bookshelf-grid'].addEventListener('pointerup', handleShelfDownloadGesture, { capture: true, passive: false });
 
         NR.els['add-tag-form'].addEventListener('submit', function(event) {
             event.preventDefault();
