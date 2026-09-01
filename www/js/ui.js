@@ -173,7 +173,7 @@
                 downloadBtn.className = 'control-button download-book-btn-on-shelf';
                 downloadBtn.innerHTML = '<i class="fa-solid fa-download"></i>';
                 downloadBtn.dataset.bookName = book.name;
-                downloadBtn.title = book.downloadState === 'complete' ? '重新下载全部章节' : '下载全部章节';
+                downloadBtn.title = book.downloadState === 'complete' ? '检查并下载更新章节' : '下载未缓存章节';
                 bookEl.dataset.hasOnlineDownload = 'true';
             }
             var tagBtn = document.createElement('button');

@@ -803,7 +803,7 @@
         }
     }
 
-    async function resolveShelfOnlineBook(bookMeta) {
+    async function resolveShelfOnlineBook(bookMeta, refreshToc) {
         var online = bookMeta && bookMeta.onlineSource;
         if (!online) throw new Error('这不是网络书源书籍');
         var source = sourceByUrl(online.sourceUrl);
@@ -820,15 +820,57 @@
         });
         if (!book.bookUrl) throw new Error('书籍地址缺失，请从书源详情重新打开');
         var chapters = Array.isArray(online.chapters) ? snapshotOnlineChapters(online.chapters) : [];
-        if (!chapters.length) {
-            book = await engine.bookInfo(source, book);
-            chapters = await engine.toc(source, book);
+        if (refreshToc || !chapters.length) {
+            try {
+                book = await engine.bookInfo(source, book);
+                chapters = await engine.toc(source, book);
+            } catch (error) {
+                // A temporary source failure should not erase a usable saved
+                // directory.  Incremental download can continue from it and
+                // retry the refresh on the next tap.
+                if (!chapters.length) throw error;
+                console.warn('[BookSource] 刷新目录失败，使用已保存目录:', error);
+            }
         }
         if (!chapters.length) throw new Error('没有获取到章节目录');
         return { source: source, book: book, chapters: chapters };
     }
 
-    /** Download every chapter for a network book already present on the shelf. */
+    function onlineChapterKey(chapter) {
+        return String(chapter && chapter.title || '') + '\n' + String(chapter && chapter.url || '');
+    }
+
+    function cachedOnlineChapterKeys(online, bookMeta, existingText) {
+        online = online || {};
+        var savedChapters = Array.isArray(online.chapters) ? snapshotOnlineChapters(online.chapters) : [];
+        var loadedIndexes = new Set(Array.isArray(online.loadedIndexes)
+            ? online.loadedIndexes.map(Number).filter(function(index) { return Number.isInteger(index) && index >= 0; })
+            : []);
+        if (!loadedIndexes.size && Number.isFinite(Number(online.nextIndex))) {
+            var nextIndex = Math.max(0, Number(online.nextIndex));
+            savedChapters.forEach(function(chapter, index) {
+                if (!chapter.isVolume && index < nextIndex) loadedIndexes.add(index);
+            });
+        }
+        var keys = new Set();
+        savedChapters.forEach(function(chapter, index) {
+            var loaded = loadedIndexes.has(index) || online.downloadState === 'complete';
+            if (loaded && !chapter.isVolume) keys.add(onlineChapterKey(chapter));
+        });
+
+        // Older versions saved only chapterCount/downloadState.  Use the
+        // existing text and count as a compatibility fallback so upgrading a
+        // completed book does not trigger a second full download.
+        if (!savedChapters.length && existingText && Number(bookMeta && bookMeta.chapterCount) > 0) {
+            var assumed = Number(bookMeta.chapterCount);
+            if (online.downloadState === 'complete' || online.downloadState === undefined) {
+                keys.add('__legacy_complete__:' + assumed);
+            }
+        }
+        return { keys: keys, savedChapters: savedChapters, loadedIndexes: loadedIndexes };
+    }
+
+    /** Download only missing/new chapters for a network book on the shelf. */
     NR.downloadOnlineBookFromShelf = async function(bookName) {
         if (state.downloadController) {
             toast('已有下载任务正在进行', true);
@@ -859,26 +901,59 @@
                 if (typeof requestAnimationFrame === 'function') requestAnimationFrame(function() { setTimeout(resolve, 50); });
                 else setTimeout(resolve, 50);
             });
-            var resolved = await resolveShelfOnlineBook(bookMeta);
+            var existingBook = await NR.storageDB.loadBook(bookName);
+            var existingText = existingBook && typeof existingBook.content === 'string' ? existingBook.content : '';
+            var resolved = await resolveShelfOnlineBook(bookMeta, true);
             var source = resolved.source;
             var book = resolved.book;
             var chapters = resolved.chapters;
-            el['source-download-title'].textContent = '正在下载全部章节';
+            var online = bookMeta.onlineSource || {};
+            var cacheInfo = cachedOnlineChapterKeys(online, bookMeta, existingText);
+            var savedKeys = cacheInfo.keys;
+            var legacyCount = 0;
+            savedKeys.forEach(function(key) {
+                if (key.indexOf('__legacy_complete__:') === 0) legacyCount = Number(key.slice(20)) || 0;
+            });
+            var freshKeys = new Set();
+            var legacyOrdinal = 0;
+            chapters.forEach(function(chapter, index) {
+                if (chapter.isVolume) return;
+                if (savedKeys.has(onlineChapterKey(chapter))) freshKeys.add(index);
+                else if (legacyOrdinal < legacyCount) freshKeys.add(index);
+                legacyOrdinal++;
+            });
+            var pendingChapters = chapters.filter(function(chapter, index) {
+                return !chapter.isVolume && !freshKeys.has(index);
+            });
+            var totalTextChapters = chapters.filter(function(chapter) { return !chapter.isVolume; }).length;
+            if (!pendingChapters.length) {
+                var currentMetadata = buildOnlineMetadata(source, book, chapters, bookMeta.name, freshKeys.size, 'complete', chapters.length, {
+                    currentIndex: chapters.length ? chapters.length - 1 : 0,
+                    loadedIndexes: chapters.map(function(chapter, index) { return chapter.isVolume || freshKeys.has(index) ? index : -1; }).filter(function(index) { return index >= 0; })
+                });
+                await NR.storageDB.saveBook({ id: bookName, content: existingText, onlineSource: currentMetadata.onlineSource });
+                saveShelfMetadata(currentMetadata);
+                NR.renderBookshelf();
+                toast('书籍已是最新，无需重复下载');
+                return;
+            }
+            el['source-download-title'].textContent = '正在下载未缓存章节';
             el['source-download-progress'].style.width = '0%';
-            el['source-download-status'].textContent = '准备下载《' + (book.name || bookMeta.name) + '》';
+            el['source-download-status'].textContent = '发现 ' + pendingChapters.length + ' 个未缓存章节，准备下载《' + (book.name || bookMeta.name) + '》';
             var failedCount = 0;
-            var failedIndexes = new Set();
-            var content = await engine.downloadBook(source, book, chapters, {
+            var content = await engine.downloadBook(source, book, pendingChapters, {
                 // One chapter at a time keeps the progress bar responsive and
                 // avoids piling up synchronous java.ajax calls from Legado rules.
                 concurrency: 1,
                 signal: controller && controller.signal,
                 continueOnError: true,
                 yieldToUi: true,
-                onChapter: function(index, text) {
+                onChapter: function(index, text, chapter) {
                     if (/\[本章加载失败：/.test(String(text || ''))) {
                         failedCount++;
-                        failedIndexes.add(index);
+                    } else {
+                        var currentIndex = chapters.findIndex(function(item) { return onlineChapterKey(item) === onlineChapterKey(chapter); });
+                        if (currentIndex >= 0) freshKeys.add(currentIndex);
                     }
                 },
                 onProgress: function(done, total, title) {
@@ -887,21 +962,24 @@
                     el['source-download-status'].textContent = done + ' / ' + total + ' · ' + title;
                 }
             });
-            var cachedCount = chapters.filter(function(chapter, index) { return !chapter.isVolume && !failedIndexes.has(index); }).length;
-            var status = failedCount ? 'partial' : 'complete';
-            var metadata = buildOnlineMetadata(source, book, chapters, bookMeta.name, cachedCount, status, chapters.length, {
+            var mergedContent = [existingText.trim(), content].filter(Boolean).join('\n\n');
+            var cachedCount = freshKeys.size;
+            var status = failedCount || cachedCount < totalTextChapters ? 'partial' : 'complete';
+            var nextIndex = chapters.findIndex(function(chapter, index) { return !chapter.isVolume && !freshKeys.has(index); });
+            if (nextIndex < 0) nextIndex = chapters.length;
+            var metadata = buildOnlineMetadata(source, book, chapters, bookMeta.name, cachedCount, status, nextIndex, {
                 currentIndex: chapters.length ? chapters.length - 1 : 0,
                 loadedIndexes: chapters.map(function(chapter, index) {
-                    return chapter.isVolume || failedIndexes.has(index) ? -1 : index;
+                    return chapter.isVolume || !freshKeys.has(index) ? -1 : index;
                 }).filter(function(index) { return index >= 0; })
             });
-            await NR.storageDB.saveBook({ id: bookMeta.name, content: content, onlineSource: metadata.onlineSource });
+            await NR.storageDB.saveBook({ id: bookMeta.name, content: mergedContent, onlineSource: metadata.onlineSource });
             saveShelfMetadata(metadata);
             if (state.onlineReader && state.onlineReader.fileName === bookMeta.name) state.onlineReader = null;
             el['source-download-progress'].style.width = '100%';
-            el['source-download-status'].textContent = failedCount ? '下载完成，但有 ' + failedCount + ' 章加载失败' : '全部章节下载完成';
+            el['source-download-status'].textContent = failedCount ? '增量下载完成，但有 ' + failedCount + ' 章加载失败' : '新增章节下载完成';
             NR.renderBookshelf();
-            toast(failedCount ? '下载完成，有 ' + failedCount + ' 章加载失败' : '全部章节下载完成', !!failedCount);
+            toast(failedCount ? '增量下载完成，有 ' + failedCount + ' 章加载失败' : '新增章节下载完成', !!failedCount);
         } catch (error) {
             if (error && error.message === '下载已取消') toast('已取消下载');
             else {
