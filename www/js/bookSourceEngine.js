@@ -526,6 +526,109 @@
         return new root.DOMParser().parseFromString(asString(value), 'text/html');
     }
 
+    // A small Jsoup facade for imported Legado rules.  Android WebView
+    // already provides DOMParser/querySelectorAll, while source scripts use
+    // the Java-shaped `org.jsoup.Jsoup.parse(...).select(...)` API.  Keeping
+    // this adapter local to each rule context avoids exposing mutable parser
+    // state globally and covers the Element/Elements methods used by common
+    // sources (text, html, attr, first, each, remove and select).
+    function createJsoupCompat() {
+        function splitSelectorGroups(selector) {
+            var groups = [];
+            var start = 0;
+            var depth = 0;
+            var quote = '';
+            for (var i = 0; i < selector.length; i++) {
+                var ch = selector[i];
+                if (quote) {
+                    if (ch === quote && selector[i - 1] !== '\\') quote = '';
+                    continue;
+                }
+                if (ch === '"' || ch === "'") quote = ch;
+                else if (ch === '(' || ch === '[') depth++;
+                else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+                else if (ch === ',' && depth === 0) {
+                    groups.push(selector.slice(start, i).trim());
+                    start = i + 1;
+                }
+            }
+            groups.push(selector.slice(start).trim());
+            return groups.filter(Boolean);
+        }
+
+        function selectNodes(context, selector) {
+            selector = asString(selector).trim();
+            if (!selector) return [];
+            var output = [];
+            splitSelectorGroups(selector).forEach(function(group) {
+                var contains = group.match(/:contains(?:Own)?\(([^()]*)\)/i);
+                if (contains) {
+                    var markerStart = contains.index;
+                    var markerEnd = markerStart + contains[0].length;
+                    var before = group.slice(0, markerStart).trim();
+                    var after = group.slice(markerEnd).trim();
+                    var candidates;
+                    try { candidates = Array.from((context || root.document).querySelectorAll(before || '*')); } catch (e) { candidates = []; }
+                    var needle = contains[1].replace(/^['"]|['"]$/g, '');
+                    candidates = candidates.filter(function(node) {
+                        var text = contains[0].toLowerCase().indexOf('containsown') >= 0
+                            ? (node.innerText || node.textContent || '')
+                            : (node.textContent || '');
+                        return String(text).indexOf(needle) >= 0;
+                    });
+                    if (after) {
+                        candidates.forEach(function(node) {
+                            try { output.push.apply(output, Array.from(node.querySelectorAll(after))); } catch (e) {}
+                        });
+                    } else output.push.apply(output, candidates);
+                    return;
+                }
+                try { output.push.apply(output, Array.from((context || root.document).querySelectorAll(group))); } catch (e) {}
+            });
+            return output.filter(function(node, index) { return output.indexOf(node) === index; });
+        }
+
+        function wrap(node) {
+            if (!node) return null;
+            return {
+                _node: node,
+                text: function() { return String(node.textContent || '').trim(); },
+                ownText: function() { return String(node.innerText || node.textContent || '').trim(); },
+                html: function() { return node.innerHTML || ''; },
+                attr: function(name) { return node.getAttribute ? (node.getAttribute(name) || '') : ''; },
+                select: function(selector) { return elements(selectNodes(node, selector)); },
+                first: function() { return wrap(selectNodes(node, '*')[0]); },
+                remove: function() { if (node.remove) node.remove(); else if (node.parentNode) node.parentNode.removeChild(node); return this; }
+            };
+        }
+
+        function elements(nodes) {
+            var list = nodes.map(wrap).filter(Boolean);
+            list.first = function() { return list.length ? list[0] : null; };
+            list.text = function() { return list.map(function(item) { return item.text(); }).join(''); };
+            list.html = function() { return list.map(function(item) { return item.html(); }).join(''); };
+            list.attr = function(name) { var item = list.first(); return item ? item.attr(name) : ''; };
+            list.select = function(selector) { return elements(nodes.reduce(function(all, node) { return all.concat(selectNodes(node, selector)); }, [])); };
+            list.each = function(callback) { list.forEach(function(item, index) { callback(index, item); }); return list; };
+            list.remove = function() { list.forEach(function(item) { item.remove(); }); return list; };
+            return list;
+        }
+
+        return {
+            jsoup: {
+                Jsoup: {
+                    parse: function(value) {
+                        var document = toDocument(value);
+                        var parsed = wrap(document);
+                        parsed.select = function(selector) { return elements(selectNodes(document, selector)); };
+                        parsed.body = function() { return wrap(document.body); };
+                        return parsed;
+                    }
+                }
+            }
+        };
+    }
+
     function normalizeCssSelector(selector) {
         return selector
             .replace(/^@CSS:/i, '')
@@ -771,6 +874,13 @@
                 request.headers = Object.assign(request.headers, parseHeaders(headers));
                 return (await self.transport.request(request)).body;
             },
+            webView: function(value) {
+                // Native Legado renders dynamic pages in a WebView here. The
+                // app's transport already receives the server HTML; returning
+                // it unchanged is the safe fallback for static content and
+                // lets the source's Jsoup selector run normally.
+                return asString(value);
+            },
             post: function(url, body, headers) {
                 return responseWrapper(self.transport.requestSync({ url: resolveUrl(url, context.baseUrl || sourceData.bookSourceUrl), method: 'POST', body: asString(body), headers: parseHeaders(headers) }));
             },
@@ -836,7 +946,8 @@
             JavaImporter: JavaImporter,
             infoMap: context.infoMap || {},
             book: decorate(context.book),
-            chapter: decorate(context.chapter)
+            chapter: decorate(context.chapter),
+            org: createJsoupCompat()
         };
     };
 
@@ -868,7 +979,7 @@
     };
 
     BookSourceEngine.prototype.withRuntimeGlobals = function(bindings, action, extraNames) {
-        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
+        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'org', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
         var names = runtimeNames.concat(extraNames || []).filter(function(name, index, all) { return all.indexOf(name) === index; });
         var previous = {};
         var existed = {};
@@ -892,7 +1003,7 @@
     // number of Legado libraries.  Keep them installed until an async rule has
     // fully settled; the synchronous helper above restores them immediately.
     BookSourceEngine.prototype.withRuntimeGlobalsAsync = async function(bindings, action, extraNames) {
-        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
+        var runtimeNames = ['java', 'source', 'sourceApi', 'cookie', 'cache', 'org', 'infoMap', 'book', 'chapter', 'baseUrl', 'redirectUrl', 'result', 'src', 'key', 'page', 'searchKey', 'searchPage'];
         var names = runtimeNames.concat(extraNames || []).filter(function(name, index, all) { return all.indexOf(name) === index; });
         var previous = {};
         var existed = {};
@@ -955,7 +1066,35 @@
 
     function addImplicitAsyncRuleReturn(script) {
         var text = asString(script).trim();
-        if (!text || /(?:^|[;\n])\s*return\b/.test(text.slice(Math.max(0, text.length - 160)))) return text;
+        if (!text) return text;
+        // Only an outer-scope return satisfies the async rule contract. A
+        // `return` inside the ubiquitous `(function(){ ... })()` wrapper
+        // must not prevent us from returning that wrapper's value.
+        var quoteAtStart = '';
+        var escapedAtStart = false;
+        var roundAtStart = 0;
+        var squareAtStart = 0;
+        var curlyAtStart = 0;
+        for (var returnIndex = 0; returnIndex < text.length; returnIndex++) {
+            var returnChar = text[returnIndex];
+            if (quoteAtStart) {
+                if (escapedAtStart) escapedAtStart = false;
+                else if (returnChar === '\\') escapedAtStart = true;
+                else if (returnChar === quoteAtStart) quoteAtStart = '';
+                continue;
+            }
+            if (returnChar === '"' || returnChar === "'") { quoteAtStart = returnChar; continue; }
+            if (returnChar === '(') roundAtStart++;
+            else if (returnChar === ')') roundAtStart = Math.max(0, roundAtStart - 1);
+            else if (returnChar === '[') squareAtStart++;
+            else if (returnChar === ']') squareAtStart = Math.max(0, squareAtStart - 1);
+            else if (returnChar === '{') curlyAtStart++;
+            else if (returnChar === '}') curlyAtStart = Math.max(0, curlyAtStart - 1);
+            else if (roundAtStart === 0 && squareAtStart === 0 && curlyAtStart === 0 &&
+                text.slice(returnIndex, returnIndex + 6) === 'return' &&
+                !/[A-Za-z0-9_$]/.test(text[returnIndex - 1] || '') &&
+                !/[A-Za-z0-9_$]/.test(text[returnIndex + 6] || '')) return text;
+        }
         // Find the last top-level statement boundary without splitting on
         // semicolons/newlines inside strings or nested expressions.
         var quote = '';
@@ -964,8 +1103,9 @@
         var square = 0;
         var curly = 0;
         var boundary = -1;
-        for (var i = 0; i < text.length; i++) {
-            var ch = text[i];
+        var boundaryText = text.replace(/;\s*$/, '');
+        for (var i = 0; i < boundaryText.length; i++) {
+            var ch = boundaryText[i];
             if (quote) {
                 if (escaped) escaped = false;
                 else if (ch === '\\') escaped = true;
@@ -982,9 +1122,9 @@
             else if ((ch === ';' || ch === '\n') && round === 0 && square === 0 && curly === 0) boundary = i;
         }
         var tailStart = boundary + 1;
-        var tail = text.slice(tailStart).trim().replace(/;\s*$/, '').trim();
+        var tail = boundaryText.slice(tailStart).trim().replace(/;\s*$/, '').trim();
         if (!tail || /^(?:var|let|const|if|for|while|try|catch|finally|switch|function|class|return|throw|break|continue)\b/.test(tail)) return text;
-        return text.slice(0, tailStart) + 'return ' + tail + ';';
+        return boundaryText.slice(0, tailStart) + 'return ' + tail + ';';
     }
 
     BookSourceEngine.prototype.evalJsAsync = async function(code, context) {

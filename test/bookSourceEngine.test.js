@@ -261,6 +261,59 @@ test('routes source login pages through the native in-app browser', () => {
     }
 });
 
+test('supports Jsoup-style Legado rules in book details', async () => {
+    const previousParser = global.DOMParser;
+    function node(text, html, attrs, children) {
+        return {
+            textContent: text || '',
+            innerHTML: html || '',
+            getAttribute(name) { return attrs && attrs[name] || ''; },
+            querySelectorAll(selector) { return (children && children[selector]) || []; },
+            remove() { this.removed = true; }
+        };
+    }
+    const authorLink = node('作者甲');
+    const authorParagraph = node('作 者：作者甲', '', {}, { a: [authorLink] });
+    const title = node('测试书');
+    global.DOMParser = class {
+        parseFromString() {
+            return {
+                nodeType: 9,
+                querySelectorAll(selector) {
+                    if (selector === 'div.novel_title' || selector === 'p.xs-title') return [title];
+                    if (selector === 'div.novel_info p') return [authorParagraph];
+                    return [];
+                }
+            };
+        }
+    };
+    try {
+        const source = normalizeSource({
+            bookSourceUrl: 'https://alicesw.test',
+            bookSourceName: '爱丽丝书屋',
+            ruleBookInfo: {
+                name: '@js:(function(){var d=org.jsoup.Jsoup.parse(result);var e=d.select(\'div.novel_title,p.xs-title\').first();return e?e.text().trim():\'\';})();',
+                author: '@js:(function(){var d=org.jsoup.Jsoup.parse(result);var e=d.select(\'div.novel_info p:contains(作 者) a\').first();return e?e.text().trim():\'\';})();'
+            }
+        });
+        const engine = new BookSourceEngine({
+            transport: {
+                async request(options) {
+                    return { status: 200, url: options.url, headers: {}, body: '<html><body>测试书</body></html>' };
+                }
+            }
+        });
+        assert.equal(await engine.evalJsAsync('<js>typeof org</js>', { source, result: '<html></html>', baseUrl: source.bookSourceUrl }), 'object');
+        assert.equal(await engine.evalJsAsync('<js>(function(){var d=org.jsoup.Jsoup.parse(result);var e=d.select(\'div.novel_title,p.xs-title\').first();return e?e.text().trim():\'\';})();</js>', { source, result: '<html></html>', baseUrl: source.bookSourceUrl }), '测试书');
+        const info = await engine.bookInfo(source, { name: '', author: '', bookUrl: source.bookSourceUrl + '/novel/1.html' });
+        assert.equal(info.name, '测试书');
+        assert.equal(info.author, '作者甲');
+    } finally {
+        if (previousParser === undefined) delete global.DOMParser;
+        else global.DOMParser = previousParser;
+    }
+});
+
 test('uses the asynchronous native transport when available', async () => {
     const previousBridge = global.NiuniuBookSource;
     global.NiuniuBookSource = {
