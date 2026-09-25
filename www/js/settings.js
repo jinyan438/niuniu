@@ -216,6 +216,9 @@
         NR.state.aiSettings.imageProvider = NR.els['image-provider-selector'].value;
         NR.state.aiSettings.nanoBananaProApiKey = NR.els['nanobananapro-api-key'].value.trim();
         NR.state.aiSettings.nanoBananaProModel = NR.els['nanobananapro-model'].value.trim() || 'gemini-2.0-flash-preview-image-generation';
+        NR.state.aiSettings.thirdPartyImageApiUrl = NR.els['thirdparty-image-api-url'].value.trim();
+        NR.state.aiSettings.thirdPartyImageApiKey = NR.els['thirdparty-image-api-key'].value.trim();
+        NR.state.aiSettings.thirdPartyImageModel = NR.els['thirdparty-image-model'].value.trim();
         localStorage.setItem("novelReaderAiSettings", JSON.stringify(NR.state.aiSettings));
 
         NR.ttsController.settings.provider = NR.ttsController.normalizeProvider(NR.els['tts-provider-selector-ai'].value);
@@ -247,6 +250,9 @@
         NR.els['image-provider-selector'].value = NR.state.aiSettings.imageProvider || "comfyui";
         NR.els['nanobananapro-api-key'].value = NR.state.aiSettings.nanoBananaProApiKey || "";
         NR.els['nanobananapro-model'].value = NR.state.aiSettings.nanoBananaProModel || "gemini-2.0-flash-preview-image-generation";
+        NR.els['thirdparty-image-api-url'].value = NR.state.aiSettings.thirdPartyImageApiUrl || "";
+        NR.els['thirdparty-image-api-key'].value = NR.state.aiSettings.thirdPartyImageApiKey || "";
+        NR.els['thirdparty-image-model'].value = NR.state.aiSettings.thirdPartyImageModel || "";
         
         // 根据选择的生图服务显示/隐藏对应设置
         NR.updateImageProviderUI();
@@ -377,9 +383,19 @@
         if (provider === 'comfyui') {
             NR.els['comfyui-settings-group'].style.display = 'block';
             NR.els['nanobananapro-settings-group'].style.display = 'none';
+            NR.els['thirdparty-settings-group'].style.display = 'none';
         } else if (provider === 'nanobananapro') {
             NR.els['comfyui-settings-group'].style.display = 'none';
             NR.els['nanobananapro-settings-group'].style.display = 'block';
+            NR.els['thirdparty-settings-group'].style.display = 'none';
+        } else if (provider === 'thirdparty') {
+            NR.els['comfyui-settings-group'].style.display = 'none';
+            NR.els['nanobananapro-settings-group'].style.display = 'none';
+            NR.els['thirdparty-settings-group'].style.display = 'block';
+        } else {
+            NR.els['comfyui-settings-group'].style.display = 'none';
+            NR.els['nanobananapro-settings-group'].style.display = 'none';
+            NR.els['thirdparty-settings-group'].style.display = 'none';
         }
     };
 })();

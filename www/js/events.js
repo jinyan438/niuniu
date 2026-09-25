@@ -4,6 +4,10 @@
 
     // 自定义下拉菜单处理
     function initCustomDropdown(dropdown, onChange) {
+        // bindEventListeners 可能因应用重新初始化而再次执行；同一控件只绑定一次，
+        // 避免一次点击触发两次 toggle，导致选项菜单立即关闭。
+        if (!dropdown || dropdown._customDropdownInitialized) return;
+        dropdown._customDropdownInitialized = true;
         var selected = dropdown.querySelector('.custom-dropdown-selected');
         var options = dropdown.querySelectorAll('.custom-dropdown-option');
         
@@ -1259,7 +1263,7 @@
             NR.generateSceneImagePrompt(text, rangeDesc).then(function(promptData) {
                 NR.showSceneImagePromptModal(promptData, imageSize);
             }).catch(function(err) {
-                if (err !== '无内容' && err !== '未配置ComfyUI') {
+                if (err !== '无内容' && err !== '未配置ComfyUI' && err !== '未配置Nano Banana Pro' && err !== '未配置第三方生图') {
                     console.error('生成场景提示词失败:', err);
                     alert('生成失败: ' + (err.message || err));
                 }

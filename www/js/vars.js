@@ -70,9 +70,12 @@ NovelReader.state = {
         commentPrompt: '',
         readerPersonas: '',
         comfyuiApiUrl: '',
-        imageProvider: 'comfyui', // 'comfyui' 或 'nanobananapro'
+        imageProvider: 'comfyui', // 'comfyui'、'nanobananapro' 或 'thirdparty'
         nanoBananaProApiKey: '',
-        nanoBananaProModel: 'gemini-2.0-flash-preview-image-generation'
+        nanoBananaProModel: 'gemini-2.0-flash-preview-image-generation',
+        thirdPartyImageApiUrl: '',
+        thirdPartyImageApiKey: '',
+        thirdPartyImageModel: ''
     },
     currentCustomFontUrl: null,
     currentBgImageUrl: null,

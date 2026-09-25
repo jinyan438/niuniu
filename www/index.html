@@ -407,6 +407,7 @@
                             <select id="image-provider-selector">
                                 <option value="comfyui">ComfyUI (本地)</option>
                                 <option value="nanobananapro">Nano Banana Pro</option>
+                                <option value="thirdparty">第三方供应商 (OpenAI兼容)</option>
                             </select>
                         </div>
                         <div id="comfyui-settings-group">
@@ -415,6 +416,11 @@
                         <div id="nanobananapro-settings-group" style="display: none;">
                             <div class="setting-item"><span>Nano Banana Pro API Key</span><input type="text" id="nanobananapro-api-key" placeholder="输入你的 API Key"></div>
                             <div class="setting-item"><span>生图模型名称</span><input type="text" id="nanobananapro-model" placeholder="例如: gemini-2.0-flash-preview-image-generation"></div>
+                        </div>
+                        <div id="thirdparty-settings-group" style="display: none;">
+                            <div class="setting-item"><span>第三方生图 API 地址</span><input type="url" id="thirdparty-image-api-url" placeholder="例如: https://api.shuaiapi.com/v1/images/generations"></div>
+                            <div class="setting-item"><span>第三方生图 API Key</span><input type="text" id="thirdparty-image-api-key" placeholder="输入你的 API Key"></div>
+                            <div class="setting-item"><span>生图模型名称</span><input type="text" id="thirdparty-image-model" placeholder="例如: dall-e-3"></div>
                         </div>
                     </div>
                     <div class="ai-menu-group">

@@ -428,6 +428,12 @@
                 alert('请先在AI设置中配置Nano Banana Pro API Key');
                 return Promise.reject('未配置Nano Banana Pro');
             }
+        } else if (provider === 'thirdparty') {
+            var thirdPartyConfigError = NR.validateThirdPartyImageConfig();
+            if (thirdPartyConfigError) {
+                alert(thirdPartyConfigError);
+                return Promise.reject('未配置第三方生图');
+            }
         }
 
         var promptTemplate = NR.DEFAULT_AI_PROMPTS.CHARACTER_IMAGE_PROMPT;
@@ -488,7 +494,7 @@
             NR.showImagePromptConfirmModal(characterName, imagePrompt);
         }).catch(function(err) {
             console.error('生成提示词失败:', err);
-            alert('生成提示词失败: ' + err.message);
+            alert('生成提示词失败: ' + (err && (err.message || String(err)) || '未知错误'));
             NR.els['app-loader'].classList.add('hidden');
             NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
         });
@@ -546,6 +552,8 @@
             // 根据选择的生图服务调用不同的API
             if (NR.state.aiSettings.imageProvider === 'nanobananapro') {
                 NR.sendCharacterImageToNanoBananaPro(characterName, finalPrompt);
+            } else if (NR.state.aiSettings.imageProvider === 'thirdparty') {
+                NR.sendCharacterImageToThirdParty(characterName, finalPrompt);
             } else {
                 NR.sendToComfyUI(characterName, finalPrompt);
             }
@@ -889,6 +897,114 @@
         });
     }
 
+    // 第三方生图服务配置校验。第三方接口要求填写可直接请求的完整 URL。
+    NR.validateThirdPartyImageConfig = function() {
+        var settings = NR.state.aiSettings || {};
+        var apiUrl = (settings.thirdPartyImageApiUrl || '').trim();
+        if (!apiUrl) return '请先在AI设置中配置第三方生图 API 地址';
+        try {
+            var parsedUrl = new URL(apiUrl);
+            if ((parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') || !parsedUrl.hostname) {
+                return '第三方生图 API 地址必须是完整的 http(s) 地址，例如：https://api.shuaiapi.com/v1/images/generations';
+            }
+        } catch (e) {
+            return '第三方生图 API 地址必须是完整的 http(s) 地址，例如：https://api.shuaiapi.com/v1/images/generations';
+        }
+        if (!(settings.thirdPartyImageApiKey || '').trim()) return '请先在AI设置中配置第三方生图 API Key';
+        if (!(settings.thirdPartyImageModel || '').trim()) return '请先在AI设置中配置第三方生图模型名称';
+        return null;
+    };
+
+    // 第三方 OpenAI 兼容接口通常返回 { data: [{ url: "..." }] }，同时兼容直接返回 url 的形式。
+    function extractThirdPartyImageUrl(payload) {
+        if (!payload || typeof payload !== 'object') return null;
+        if (typeof payload.url === 'string' && payload.url.trim()) return payload.url.trim();
+
+        var data = payload.data;
+        if (Array.isArray(data)) {
+            for (var i = 0; i < data.length; i++) {
+                if (data[i] && typeof data[i].url === 'string' && data[i].url.trim()) {
+                    return data[i].url.trim();
+                }
+            }
+        } else if (data && typeof data.url === 'string' && data.url.trim()) {
+            return data.url.trim();
+        }
+        return null;
+    }
+
+    // 发送第三方生图请求。接口地址不做任何路径拼接，图片从响应的 url 字段读取。
+    function sendThirdPartyImageRequest(imagePrompt, size, onSuccess, onError) {
+        var settings = NR.state.aiSettings || {};
+        var apiUrl = (settings.thirdPartyImageApiUrl || '').trim();
+        var apiKey = (settings.thirdPartyImageApiKey || '').trim();
+        var model = (settings.thirdPartyImageModel || '').trim();
+        var requestBody = {
+            model: model,
+            prompt: imagePrompt,
+            n: 1,
+            response_format: 'url'
+        };
+        if (size) requestBody.size = size;
+
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() { controller.abort(); }, 300000); // 5分钟超时
+        fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal
+        }).then(function(res) {
+            clearTimeout(timeoutId);
+            return res.text().then(function(responseText) {
+                var data = null;
+                try {
+                    data = responseText ? JSON.parse(responseText) : null;
+                } catch (e) {
+                    data = null;
+                }
+                if (!res.ok) {
+                    var message = data && data.error && data.error.message
+                        ? data.error.message
+                        : (data && data.message ? data.message : responseText);
+                    throw new Error('第三方生图请求失败: ' + res.status + (message ? ' ' + message : ''));
+                }
+                return data;
+            });
+        }).then(function(data) {
+            var imageUrl = extractThirdPartyImageUrl(data);
+            if (!imageUrl) throw new Error('第三方生图响应中未找到 url 字段');
+            onSuccess(imageUrl);
+        }).catch(function(err) {
+            clearTimeout(timeoutId);
+            onError(err);
+        });
+    }
+
+    function getThirdPartyImageSize(imageSize) {
+        // 使用 OpenAI Images API 常见尺寸；未选择或不支持的比例由服务端采用默认尺寸。
+        if (imageSize === 'square') return '1024x1024';
+        if (imageSize === 'portrait_3_4' || imageSize === 'portrait_9_16') return '1024x1792';
+        if (imageSize === 'landscape_4_3' || imageSize === 'landscape_16_9') return '1792x1024';
+        return null;
+    }
+
+    function finishThirdPartyImageRequestError(err, providerLabel) {
+        NR.els['app-loader'].classList.add('hidden');
+        NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
+        console.error(providerLabel + ' 请求错误:', err);
+        var errorMsg = err && (err.message || String(err)) || '未知错误';
+        if (err && err.name === 'AbortError') {
+            errorMsg = '请求超时（5分钟），请检查网络连接';
+        } else if (errorMsg === 'Failed to fetch') {
+            errorMsg = '网络请求失败，请检查网络连接、API 地址和 API Key';
+        }
+        alert('生成失败: ' + errorMsg);
+    }
+
     // 发送人物封面到 Nano Banana Pro (使用Gemini官方API)
     NR.sendCharacterImageToNanoBananaPro = function(characterName, imagePrompt) {
         NR.els['app-loader'].classList.remove('hidden');
@@ -961,6 +1077,44 @@
         });
     };
 
+    // 发送人物封面到第三方 OpenAI 兼容生图接口
+    NR.sendCharacterImageToThirdParty = function(characterName, imagePrompt) {
+        NR.els['app-loader'].classList.remove('hidden');
+        NR.els['app-loader'].querySelector('span').textContent = '正在生成图片...';
+
+        var configError = NR.validateThirdPartyImageConfig();
+        if (configError) {
+            NR.els['app-loader'].classList.add('hidden');
+            NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
+            alert(configError);
+            return;
+        }
+
+        sendThirdPartyImageRequest(imagePrompt, '1024x1536', function(imageUrl) {
+            var profile = NR.state.currentBookData.characterProfiles.find(function(p) { return p.name === characterName; });
+            if (profile) {
+                profile.cover = imageUrl;
+                profile.originalCover = imageUrl;
+                NR.saveBookData();
+                NR.renderCharacterHistory();
+                var detailModal = document.getElementById('character-detail-modal');
+                if (detailModal) {
+                    var avatar = detailModal.querySelector('.character-detail-avatar');
+                    if (avatar) {
+                        avatar.style.backgroundImage = 'url(' + imageUrl + ')';
+                        avatar.style.backgroundSize = 'cover';
+                        avatar.textContent = '';
+                    }
+                }
+                alert('人物封面生成成功！');
+            }
+            NR.els['app-loader'].classList.add('hidden');
+            NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
+        }, function(err) {
+            finishThirdPartyImageRequestError(err, '第三方生图');
+        });
+    };
+
     // 场景生图 - 生成提示词
     NR.generateSceneImagePrompt = function(text, rangeDesc) {
         return NR.handleAddToShelf().then(function() {
@@ -982,6 +1136,12 @@
                 if (!nanoBananaProApiKey) {
                     alert('请先在AI设置中配置Nano Banana Pro API Key');
                     return Promise.reject('未配置Nano Banana Pro');
+                }
+            } else if (provider === 'thirdparty') {
+                var thirdPartyConfigError = NR.validateThirdPartyImageConfig();
+                if (thirdPartyConfigError) {
+                    alert(thirdPartyConfigError);
+                    return Promise.reject('未配置第三方生图');
                 }
             }
 
@@ -1079,6 +1239,8 @@
             // 根据选择的生图服务调用不同的API
             if (NR.state.aiSettings.imageProvider === 'nanobananapro') {
                 NR.sendSceneImageToNanoBananaPro(finalPrompt, promptData.rangeDesc, promptData.originalText, imageSize);
+            } else if (NR.state.aiSettings.imageProvider === 'thirdparty') {
+                NR.sendSceneImageToThirdParty(finalPrompt, promptData.rangeDesc, promptData.originalText, imageSize);
             } else {
                 NR.sendSceneImageToComfyUI(finalPrompt, promptData.rangeDesc, promptData.originalText, imageSize);
             }
@@ -1289,6 +1451,38 @@
                 errorMsg = '网络请求失败，请检查：\n1. 网络连接是否正常\n2. API Key是否正确\n3. 是否需要科学上网';
             }
             alert('生成失败: ' + errorMsg);
+        });
+    };
+
+    // 发送场景图到第三方 OpenAI 兼容生图接口
+    NR.sendSceneImageToThirdParty = function(imagePrompt, rangeDesc, originalText, imageSize) {
+        NR.els['app-loader'].classList.remove('hidden');
+        NR.els['app-loader'].querySelector('span').textContent = '正在生成场景图...';
+
+        var configError = NR.validateThirdPartyImageConfig();
+        if (configError) {
+            NR.els['app-loader'].classList.add('hidden');
+            NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
+            alert(configError);
+            return;
+        }
+
+        sendThirdPartyImageRequest(imagePrompt, getThirdPartyImageSize(imageSize), function(imageUrl) {
+            var sceneImage = {
+                image: imageUrl,
+                prompt: imagePrompt,
+                rangeDesc: rangeDesc,
+                originalText: originalText,
+                timestamp: Date.now(),
+                provider: 'thirdparty'
+            };
+            NR.state.currentBookData.sceneImages.push(sceneImage);
+            NR.saveBookData();
+            NR.els['app-loader'].classList.add('hidden');
+            NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
+            NR.showGeneratedSceneImage(sceneImage);
+        }, function(err) {
+            finishThirdPartyImageRequestError(err, '第三方生图');
         });
     };
 

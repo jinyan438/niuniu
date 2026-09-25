@@ -401,6 +401,10 @@
     NR.initUnifiedImageSizeDropdown = function() {
         var dropdown = document.getElementById('unified-image-size');
         if (!dropdown) return;
+        // 该函数会在每次打开/刷新 AI 数据库时调用；避免重复绑定导致一次点击执行多次 toggle，
+        // 从而出现下拉框刚打开就被再次关闭、尺寸始终停留在默认值的问题。
+        if (dropdown._imageSizeDropdownInitialized) return;
+        dropdown._imageSizeDropdownInitialized = true;
         
         var selected = dropdown.querySelector('.custom-dropdown-selected');
         var options = dropdown.querySelectorAll('.custom-dropdown-option');
@@ -433,6 +437,8 @@
     NR.initUnifiedVersionDropdown = function() {
         var dropdown = document.getElementById('unified-data-version');
         if (!dropdown) return;
+        if (dropdown._versionDropdownInitialized) return;
+        dropdown._versionDropdownInitialized = true;
         
         var selected = dropdown.querySelector('.custom-dropdown-selected');
         
@@ -1361,6 +1367,12 @@
                             alert('请先在设置中配置 Nano Banana Pro API Key');
                             return;
                         }
+                    } else if (provider === 'thirdparty') {
+                        var thirdPartyConfigError = NR.validateThirdPartyImageConfig();
+                        if (thirdPartyConfigError) {
+                            alert(thirdPartyConfigError);
+                            return;
+                        }
                     }
                     
                     var result = getTextAndRangeFromUnified();
@@ -1381,7 +1393,7 @@
                     NR.generateSceneImagePrompt(result.text, result.rangeDesc).then(function(promptData) {
                         NR.showSceneImagePromptModal(promptData, sizeValue);
                     }).catch(function(err) {
-                        if (err !== '无内容' && err !== '未配置ComfyUI' && err !== '未配置Nano Banana Pro') {
+                        if (err !== '无内容' && err !== '未配置ComfyUI' && err !== '未配置Nano Banana Pro' && err !== '未配置第三方生图') {
                             console.error('生成场景提示词失败:', err);
                             alert('生成失败: ' + (err.message || err));
                         }

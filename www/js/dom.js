@@ -43,6 +43,7 @@
             'character-page-range-selector', 'character-chapter-range-selector', 'character-page-range',
             'character-chapter-range', 'character-sequel-range-selector', 'character-sequel-select', 'comfyui-api-url', 
             'image-provider-selector', 'comfyui-settings-group', 'nanobananapro-settings-group', 'nanobananapro-api-key', 'nanobananapro-model',
+            'thirdparty-settings-group', 'thirdparty-image-api-url', 'thirdparty-image-api-key', 'thirdparty-image-model',
             'search-bar', 'search-input',
             'btn-search-chapter', 'btn-search-all', 'btn-search-prev', 'btn-search-next', 'search-results-info',
             'btn-close-search', 'tts-player-controls', 'tts-status', 'btn-tts-prev', 'btn-tts-play-pause',
