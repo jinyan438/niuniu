@@ -882,7 +882,7 @@
     NR.toggleListenMode = function() {
         NR.state.isListenMode = !NR.state.isListenMode;
         NR.els['btn-listen-mode'].classList.toggle('active', NR.state.isListenMode);
-        NR.els['content-wrapper'].style.cursor = NR.state.isListenMode ? 'cell' : (NR.state.settings.enableClickPage ? 'pointer' : 'default');
+        NR.els['content-wrapper'].style.cursor = NR.state.isListenMode ? 'cell' : (NR.state.settings.enableClickPage ? 'default' : (NR.state.settings.enableSwipePage ? 'pointer' : 'default'));
         if (!NR.state.isListenMode) {
             NR.stopTts();
         } else {

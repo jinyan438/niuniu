@@ -194,23 +194,29 @@
         </div>
 
         <div class="reader-container" style="display: none;">
-            <header>
-                <p id="header-filename">请选择文件或从书架打开</p>
-                <div class="controls">
-                    <button id="btn-back-to-shelf" class="control-button">返回书架</button>
+            <div class="reader-progress-track" aria-hidden="true"><span id="reader-progress-value"></span></div>
+            <header class="reader-topbar">
+                <button id="btn-back-to-shelf" class="reader-icon-button" type="button" title="返回书架" aria-label="返回书架"><i class="fa-solid fa-chevron-left"></i></button>
+                <div class="reader-heading">
+                    <p id="header-filename">请选择文件或从书架打开</p>
+                    <span id="chapter-info"></span>
+                </div>
+                <div class="reader-actions">
                     <input type="file" id="file-input" accept=".txt,.epub" style="display:none;">
                     <input type="file" id="import-files-input" accept=".txt,.epub" multiple style="display:none;">
                     <input type="file" id="import-folder-input" webkitdirectory style="display:none;">
-                    <button id="btn-search" class="control-button">搜索</button>
-                    <button id="btn-settings" class="control-button">设置</button>
-                    
-                    <button id="btn-listen-mode" class="control-button">听书模式</button>
-                    
-                    <button id="btn-add-to-shelf" class="control-button" style="display: none;">添加到书架</button>
-                    <button id="btn-immersive-mode" class="control-button">沉浸模式</button>
-                    <button id="btn-catalog" class="control-button" style="display: none;">目录</button>
-                    <button id="btn-ai-menu" class="control-button" style="display: none;">AI数据库</button>
-                    <button id="btn-back-to-original" class="control-button" style="display: none;">返回原文</button>
+                    <button id="reader-more-toggle" class="reader-icon-button" type="button" title="更多功能" aria-label="更多功能" aria-expanded="false"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+                    <div id="reader-more-menu" class="reader-more-menu" hidden>
+                        <button id="btn-search" class="reader-menu-action" type="button"><i class="fa-solid fa-magnifying-glass"></i> 搜索</button>
+                        <button id="btn-listen-mode" class="reader-menu-action" type="button"><i class="fa-solid fa-volume-high"></i> 听书模式</button>
+                        <button id="btn-settings" class="reader-menu-action" type="button"><i class="fa-solid fa-sun"></i> 阅读设置</button>
+                        <button id="reader-bookmark-button" class="reader-menu-action" type="button" title="添加书签" aria-label="添加书签"><i class="fa-regular fa-bookmark"></i> 添加书签</button>
+                        <button id="btn-catalog" class="reader-menu-action" type="button" title="目录" aria-label="目录"><i class="fa-solid fa-bars"></i> 目录</button>
+                        <button id="btn-ai-menu" class="reader-menu-action" type="button" title="AI 数据库" aria-label="AI 数据库"><i class="fa-solid fa-database"></i> AI 数据库</button>
+                        <button id="btn-immersive-mode" class="reader-menu-action" type="button"><i class="fa-solid fa-expand"></i> 沉浸模式</button>
+                        <button id="btn-add-to-shelf" class="reader-menu-action" type="button"><i class="fa-solid fa-book-medical"></i> 添加到书架</button>
+                        <button id="btn-back-to-original" class="reader-menu-action" type="button"><i class="fa-solid fa-arrow-rotate-left"></i> 返回原文</button>
+                    </div>
                 </div>
             </header>
             <div id="search-bar" style="display: none;">
@@ -229,13 +235,32 @@
                     <div class="page-container" id="next-page-container"></div>
                 </div>
             </main>
-            <footer id="footer">
-                <span id="chapter-info"></span>
-                <span id="page-info">-- / -- 页</span>
+            <footer id="footer" class="reader-bottombar">
+                <button id="reader-prev-chapter" class="reader-chapter-nav" type="button">上一章</button>
+                <span id="page-info">-- / --</span>
+                <button id="reader-next-chapter" class="reader-chapter-nav" type="button">下一章</button>
             </footer>
         </div>
 
-        <div id="catalog-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>章节目录</h2><button class="close-button">&times;</button></div><ul id="catalog-list" class="modal-list"></ul></div></div>
+        <div id="reader-mode-loading" class="reader-mode-loading" aria-hidden="true">
+            <div class="reader-mode-loading-card" role="status" aria-live="polite">
+                <span class="reader-mode-spinner" aria-hidden="true"></span>
+                <span>正在切换阅读模式…</span>
+            </div>
+        </div>
+
+        <div id="catalog-modal" class="modal reader-drawer-modal">
+            <div class="reader-drawer-panel">
+                <div class="reader-drawer-tabs">
+                    <button class="reader-drawer-tab active" type="button" data-reader-tab="toc">目录</button>
+                    <button class="reader-drawer-tab" type="button" data-reader-tab="marks">书签</button>
+                    <button class="close-button reader-drawer-close" type="button" aria-label="关闭目录">&times;</button>
+                </div>
+                <label class="reader-toc-search"><i class="fa-solid fa-magnifying-glass"></i><input id="reader-toc-search" type="search" placeholder="搜索章节"></label>
+                <ul id="catalog-list" class="modal-list"></ul>
+                <div id="reader-bookmark-list" class="reader-bookmark-list" hidden></div>
+            </div>
+        </div>
         
         <div id="tag-edit-modal" class="modal">
             <div class="modal-content">
@@ -263,8 +288,8 @@
             <div class="modal-content">
                 <div class="modal-header"><h2>阅读设置</h2><button class="close-button">&times;</button></div>
                 <div id="settings-list">
-                    <div class="setting-item"><span>点击翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-click-page"><span class="slider"></span></label></div>
-                    <div class="setting-item"><span>滑动翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-swipe-page"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span title="开启连续滚动阅读，关闭后恢复左右分页阅读">滚动翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-click-page"><span class="slider"></span></label></div>
+                    <div class="setting-item"><span title="开启后可左右滑动，或点击阅读区两侧空白处翻页">左右翻页</span><label class="toggle-switch"><input type="checkbox" id="toggle-swipe-page"><span class="slider"></span></label></div>
                     <div class="setting-item"><span>段落悬停高亮</span><label class="toggle-switch"><input type="checkbox" id="toggle-hover-highlight"><span class="slider"></span></label></div>
                     <div class="setting-item"><span>对白文字标色</span><label class="toggle-switch"><input type="checkbox" id="toggle-dialogue-highlight"><span class="slider"></span></label></div>
                     <div class="setting-item"><span>专注模式</span><label class="toggle-switch"><input type="checkbox" id="toggle-focus-mode"><span class="slider"></span></label></div>
@@ -883,6 +908,7 @@
     <script src="js/bookSource.js"></script>
     <script src="js/fanqie.js"></script>
     <script src="js/events.js"></script>
+    <script src="js/readerLayout.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

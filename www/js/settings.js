@@ -13,6 +13,16 @@
         localStorage.setItem('novelReaderSettings', JSON.stringify(NR.state.settings));
     };
 
+    NR.normalizeReaderModeSettings = function() {
+        var scrollMode = NR.state.settings.enableClickPage !== false;
+        var swipeMode = !scrollMode;
+        var changed = NR.state.settings.enableClickPage !== scrollMode ||
+            NR.state.settings.enableSwipePage !== swipeMode;
+        NR.state.settings.enableClickPage = scrollMode;
+        NR.state.settings.enableSwipePage = swipeMode;
+        return changed;
+    };
+
     NR.loadSettings = function() {
         var saved = localStorage.getItem('novelReaderSettings');
         if (saved) {
@@ -26,8 +36,11 @@
     };
 
     NR.applySettings = function() {
+        if (NR.normalizeReaderModeSettings()) NR.saveSettings();
         if (NR.els['content-wrapper']) {
-            NR.els['content-wrapper'].style.cursor = NR.state.settings.enableClickPage ? 'pointer' : 'default';
+            NR.els['content-wrapper'].style.cursor = NR.state.settings.enableClickPage
+                ? 'default'
+                : (NR.state.settings.enableSwipePage ? 'pointer' : 'default');
         }
         NR.els['toggle-click-page'].checked = NR.state.settings.enableClickPage;
         NR.els['toggle-swipe-page'].checked = NR.state.settings.enableSwipePage;
@@ -85,6 +98,8 @@
         NR.els['line-height-value'].textContent = NR.state.settings.lineHeight.toFixed(1);
         NR.els['paragraph-spacing-slider'].value = NR.state.settings.paragraphSpacing;
         NR.els['paragraph-spacing-value'].textContent = NR.state.settings.paragraphSpacing.toFixed(1) + 'em';
+
+        if (typeof NR.applyReaderMode === 'function') NR.applyReaderMode();
     };
 
     function normalizeReaderPersonaList(value) {
@@ -171,9 +186,19 @@
         NR.renderReaderPersonaCards(NR.collectReaderPersonaCards());
     };
 
-    NR.handleSettingsChange = function() {
-        NR.state.settings.enableClickPage = NR.els['toggle-click-page'].checked;
-        NR.state.settings.enableSwipePage = NR.els['toggle-swipe-page'].checked;
+    NR.handleSettingsChange = function(event) {
+        var target = event && event.target;
+        if (target && target.id === 'toggle-click-page') {
+            NR.state.settings.enableClickPage = target.checked;
+            NR.state.settings.enableSwipePage = !target.checked;
+            NR.els['toggle-swipe-page'].checked = !target.checked;
+        } else if (target && target.id === 'toggle-swipe-page') {
+            NR.state.settings.enableSwipePage = target.checked;
+            NR.state.settings.enableClickPage = !target.checked;
+            NR.els['toggle-click-page'].checked = !target.checked;
+        } else {
+            NR.normalizeReaderModeSettings();
+        }
         NR.state.settings.enableHoverHighlight = NR.els['toggle-hover-highlight'].checked;
         NR.state.settings.enableDialogueHighlight = NR.els['toggle-dialogue-highlight'].checked;
         NR.state.settings.enableFocusMode = NR.els['toggle-focus-mode'].checked;

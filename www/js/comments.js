@@ -723,8 +723,8 @@
         updateCommentSheet(thread, selectionInfo);
     }
 
-    NR.refreshCommentMarkers = function() {
-        var pages = NR.state.allRenderedPages || [];
+    NR.refreshCommentMarkers = function(targetPages) {
+        var pages = targetPages || NR.state.allRenderedPages || [];
         pages.forEach(function(page) {
             page.querySelectorAll('.paragraph-comment-button').forEach(function(btn) {
                 btn.remove();

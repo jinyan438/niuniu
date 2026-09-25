@@ -98,33 +98,62 @@
         }
 
         function getEventX(e) {
-            return e.type.startsWith('touch') ? e.changedTouches[0].clientX : e.clientX;
+            if (!e.type.startsWith('touch')) return e.clientX;
+            var touch = e.touches && e.touches.length ? e.touches[0] : e.changedTouches[0];
+            return touch.clientX;
         }
         function dragStart(e) {
             if (!NR.state.settings.enableSwipePage || NR.state.totalPages <= 0 || NR.state.isTransitioning) return;
+            if (e.type === 'mousedown' && e.button !== 0) return;
             if (e.type === 'mousedown' && e.target.closest && e.target.closest('.page p')) return;
             NR.state.isDragging = true;
             NR.state.dragStartX = getEventX(e);
-            NR.els['content-inner'].classList.add('is-dragging');
+            NR.state.dragStartY = getEventY(e);
+            NR.state.dragDelta = 0;
+            NR.state.dragAxis = null;
+            if (!NR.els.readerView.classList.contains('reader-scroll-layout')) {
+                NR.els['content-inner'].classList.add('is-dragging');
+            }
         }
         function dragMove(e) {
             if (!NR.state.isDragging) return;
             NR.state.dragDelta = getEventX(e) - NR.state.dragStartX;
+            if (NR.els.readerView.classList.contains('reader-scroll-layout')) {
+                var deltaY = getEventY(e) - NR.state.dragStartY;
+                if (Math.max(Math.abs(NR.state.dragDelta), Math.abs(deltaY)) > 8) {
+                    NR.state.dragAxis = Math.abs(NR.state.dragDelta) > Math.abs(deltaY) ? 'horizontal' : 'vertical';
+                }
+                return;
+            }
             NR.els['content-inner'].style.transform = 'translateX(' + (NR.state.currentTranslate + NR.state.dragDelta) + 'px)';
         }
         function dragEnd() {
             if (!NR.state.isDragging) return;
             NR.state.isDragging = false;
             NR.els['content-inner'].classList.remove('is-dragging');
-            var threshold = NR.state.viewportWidth * 0.3;
-            if (Math.abs(NR.state.dragDelta) > 10) NR.state.ignoreNextClick = true;
+            var scrollMode = NR.els.readerView.classList.contains('reader-scroll-layout');
+            if (scrollMode && NR.state.dragAxis !== 'horizontal') {
+                NR.state.dragDelta = 0;
+                NR.state.dragAxis = null;
+                return;
+            }
+            var threshold = scrollMode
+                ? Math.max(48, NR.state.viewportWidth * 0.16)
+                : NR.state.viewportWidth * 0.3;
+            if (Math.abs(NR.state.dragDelta) > 10) {
+                NR.state.ignoreNextClick = true;
+                setTimeout(function() { NR.state.ignoreNextClick = false; }, 500);
+            }
             if (NR.state.dragDelta < -threshold) NR.jumpToPage(NR.state.currentPage + 1);
             else if (NR.state.dragDelta > threshold) NR.jumpToPage(NR.state.currentPage - 1);
-            else NR.els['content-inner'].style.transform = 'translateX(' + NR.state.currentTranslate + 'px)';
+            else if (!scrollMode) NR.els['content-inner'].style.transform = 'translateX(' + NR.state.currentTranslate + 'px)';
             NR.state.dragDelta = 0;
+            NR.state.dragAxis = null;
         }
         function getEventY(e) {
-            return e.type.startsWith('touch') ? e.touches[0].pageY : e.pageY;
+            if (!e.type.startsWith('touch')) return e.clientY;
+            var touch = e.touches && e.touches.length ? e.touches[0] : e.changedTouches[0];
+            return touch.clientY;
         }
         function shelfDragStart(e) {
             // Action buttons must never start the bookshelf drag/selection
@@ -173,10 +202,11 @@
         });
         
         NR.els['catalog-list'].addEventListener('click', function(event) {
-            if (event.target.tagName !== 'LI') return;
+            var catalogItem = event.target.closest('#catalog-list li');
+            if (!catalogItem) return;
             var onlineSession = NR.bookSourceState && NR.bookSourceState.onlineReader;
-            if (onlineSession && event.target.dataset.chapterIndex !== undefined) {
-                var chapterIndex = Number(event.target.dataset.chapterIndex);
+            if (onlineSession && catalogItem.dataset.chapterIndex !== undefined) {
+                var chapterIndex = Number(catalogItem.dataset.chapterIndex);
                 var chapterTitle = onlineSession.chapters[chapterIndex] && onlineSession.chapters[chapterIndex].title;
                 var targetPage = -1;
                 for (var onlinePageIndex = 0; onlinePageIndex < NR.state.allRenderedPages.length; onlinePageIndex++) {
@@ -197,7 +227,7 @@
                 else if (typeof NR.openOnlineChapterAt === 'function') NR.openOnlineChapterAt(chapterIndex);
                 return;
             }
-            var pId = event.target.dataset.pId;
+            var pId = catalogItem.dataset.pId;
             var targetPage = -1;
             for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
                 if (NR.state.allRenderedPages[i].querySelector('#' + pId)) {
@@ -221,7 +251,7 @@
             }
         });
         
-        ['toggle-click-page', 'toggle-swipe-page', 'toggle-hover-highlight', 'toggle-dialogue-highlight', 'toggle-focus-mode'].forEach(function(id) {
+        ['toggle-hover-highlight', 'toggle-dialogue-highlight', 'toggle-focus-mode'].forEach(function(id) {
             NR.els[id].addEventListener('change', NR.handleSettingsChange);
         });
         
@@ -1360,13 +1390,16 @@
                 if (clickedP) NR.startTtsFrom(clickedP);
                 return;
             }
+            if (!NR.state.settings.enableSwipePage) return;
             var rect = event.currentTarget.getBoundingClientRect();
-            var clickX = event.clientX;
-            var leftBoundary = rect.left + rect.width / 3;
-            var rightBoundary = rect.right - rect.width / 3;
-            if (NR.state.settings.enableClickPage && clickX < leftBoundary) {
+            var clickRatio = (event.clientX - rect.left) / rect.width;
+            var clickedPage = event.target.closest('.page');
+            var pageRect = clickedPage && clickedPage.getBoundingClientRect();
+            if (clickRatio < 0.16) {
+                if (pageRect && event.target.closest('.page p') && event.clientX > pageRect.left + 40) return;
                 NR.jumpToPage(NR.state.currentPage - 1);
-            } else if (NR.state.settings.enableClickPage && clickX > rightBoundary) {
+            } else if (clickRatio > 0.84) {
+                if (pageRect && event.target.closest('.page p') && event.clientX < pageRect.right - 40) return;
                 NR.jumpToPage(NR.state.currentPage + 1);
             }
         });
@@ -1407,7 +1440,7 @@
         });
         document.addEventListener('mousemove', dragMove);
         document.addEventListener('touchmove', dragMove, { passive: true });
-        ['mouseup', 'mouseleave', 'touchend'].forEach(function(evt) { document.addEventListener(evt, dragEnd); });
+        ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(function(evt) { document.addEventListener(evt, dragEnd); });
         NR.els['bookshelf-grid'].addEventListener('mousedown', function(event) {
             if (event.target && event.target.closest && event.target.closest('.book-actions')) {
                 event.stopPropagation();
