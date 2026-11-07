@@ -91,7 +91,12 @@
             NR.els['app-loader'].querySelector("span").textContent = "正在翻译，请稍候...";
 
             var translationInstruction = NR.state.aiSettings.translationPrompt || NR.DEFAULT_AI_PROMPTS.TRANSLATION;
-            var prompt = context + translationInstruction + '\n\n---\n\n' + text;
+            var reference = NR.buildAIReferenceContext ? NR.buildAIReferenceContext(rangeDesc, false) : '';
+            var earlierTranslations = NR.getPreviousRecordsByRange ? NR.getPreviousRecordsByRange(NR.state.currentBookData.translations || [], rangeDesc, 'sourceRange').slice(-3) : [];
+            if (earlierTranslations.length) reference += '【前文译文参考】\n' + earlierTranslations.map(function(item) {
+                return '[' + item.sourceRange + ']\n' + item.content;
+            }).join('\n\n') + '\n请保持同一人物、地点和术语的译法一致，只翻译本次原文。\n\n';
+            var prompt = context + reference + translationInstruction + '\n\n---\n\n' + text;
 
             return fetch(getFullApiUrl(), {
                 method: "POST",
@@ -114,11 +119,11 @@
             }).then(function(data) {
                 var translatedContent = (data.choices && data.choices[0] && data.choices[0].message) ? data.choices[0].message.content : null;
                 if (translatedContent) {
-                    NR.state.currentBookData.translations.push({
+                    NR.state.currentBookData.translations.push(Object.assign({
                         content: translatedContent.trim(),
                         sourceRange: rangeDesc,
                         timestamp: Date.now()
-                    });
+                    }, NR.getFormSaveScope ? NR.getFormSaveScope(rangeDesc) : {}));
                     NR.saveBookData();
                     NR.state.originalContentForSubView = { name: NR.state.currentFileName, content: NR.state.currentFileContent };
                     NR.state.activeSubView = 'translation';
@@ -1158,7 +1163,8 @@
                 // ComfyUI/SD 使用英文tag提示词
                 promptTemplate = NR.DEFAULT_AI_PROMPTS.SCENE_IMAGE_PROMPT;
             }
-            var prompt = promptTemplate.replace('{text}', text);
+            var reference = NR.buildAIReferenceContext ? NR.buildAIReferenceContext(rangeDesc, false) : '';
+            var prompt = reference + promptTemplate.replace('{text}', text);
 
             return fetch(getFullApiUrl(), {
                 method: 'POST',

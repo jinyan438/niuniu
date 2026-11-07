@@ -450,9 +450,14 @@
         var calendarState = NR.state.phoneChatState.calendarState;
         var selectedSummaries = calendarState.selectedSummaries || [];
         var contextParts = [];
+        var range = NR.getSelectedAIRange();
+        var scoped = !!NR.getAIRangeBounds(range);
+        var source = scoped ? NR.getAIReferenceData(range, true) : NR.state.currentBookData;
         
         // 自动加入人物卡
-        var profiles = NR.state.currentBookData.characterProfiles || [];
+        var profiles = scoped ? [source.protagonistInfo].concat(source.importantNPCs || []).filter(function(record) {
+            return record && record.data;
+        }).map(function(record) { return { name: record.data.name, data: NR.convertFormToProfile(record.data) }; }) : (source.characterProfiles || []);
         profiles.forEach(function(profile) {
             if (profile) {
                 contextParts.push('【人物卡片 - ' + profile.name + '】\n' + NR.getCharacterTagsInfo(profile));
@@ -460,7 +465,8 @@
         });
         
         // 自动加入全局数据
-        var globalData = NR.state.currentBookData.globalData;
+        var globalRecord = source.globalData;
+        var globalData = globalRecord && (globalRecord.data || globalRecord);
         if (globalData) {
             var globalText = '【全局数据】\n';
             for (var k in globalData) {
@@ -472,8 +478,9 @@
         }
         
         // 自动加入任务事件
-        var quests = NR.state.currentBookData.quests || [];
-        quests.forEach(function(quest) {
+        var quests = source.quests || [];
+        quests.forEach(function(record) {
+            var quest = record && (record.data || record);
             if (quest) {
                 var questText = '【任务事件 - ' + quest.name + '】\n';
                 questText += '类型: ' + (quest.type || '-') + '\n';
@@ -486,8 +493,9 @@
         });
         
         // 自动加入重要情报
-        var intels = NR.state.currentBookData.intels || [];
-        intels.forEach(function(intel) {
+        var intels = source.intels || [];
+        intels.forEach(function(record) {
+            var intel = record && (record.data || record);
             if (intel) {
                 var intelText = '【重要情报 - ' + intel.name + '】\n';
                 intelText += '类型: ' + (intel.type || '-') + '\n';

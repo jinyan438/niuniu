@@ -299,7 +299,7 @@
         var dataToSave = JSON.parse(JSON.stringify(NR.state.currentBookData));
         
         // 提取图片到IndexedDB，然后保存元数据到localStorage
-        NR.extractAndSaveImages(dataToSave, fileNameToSave).then(function() {
+        return NR.extractAndSaveImages(dataToSave, fileNameToSave).then(function() {
             try {
                 localStorage.setItem('novelReaderData_' + fileNameToSave, JSON.stringify(dataToSave));
             } catch (e) {

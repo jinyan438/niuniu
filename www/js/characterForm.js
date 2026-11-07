@@ -210,6 +210,401 @@
         
         // 为已有数据创建初始历史版本（数据迁移）
         NR.migrateDataToHistory();
+        NR.deduplicateChapterFormHistory();
+        if (NR.restoreCharacterProfileDetails()) NR.saveBookData();
+        var timelines = NR.repairTimelineScopes(NR.state.currentBookData.timelines);
+        if (JSON.stringify(timelines) !== JSON.stringify(NR.state.currentBookData.timelines)) {
+            NR.state.currentBookData.timelines = timelines;
+            NR.saveBookData();
+        }
+    };
+
+    NR.FORM_DATA_TYPES = [
+        { key: 'globalData', current: 'globalData', history: 'globalDataHistory', type: 'globalData' },
+        { key: 'protagonist', current: 'protagonistInfo', history: 'protagonistHistory', type: 'protagonist' },
+        { key: 'npcs', current: 'importantNPCs', history: 'npcHistory', type: 'npc', list: true },
+        { key: 'skills', current: 'skills', history: 'skillsHistory', type: 'skills', list: true },
+        { key: 'items', current: 'items', history: 'itemsHistory', type: 'items', list: true },
+        { key: 'quests', current: 'quests', history: 'questsHistory', type: 'quests', list: true },
+        { key: 'locations', current: 'locations', history: 'locationsHistory', type: 'locations', list: true },
+        { key: 'equipments', current: 'equipments', history: 'equipmentsHistory', type: 'equipments', list: true },
+        { key: 'factions', current: 'factions', history: 'factionsHistory', type: 'factions', list: true },
+        { key: 'intels', current: 'intels', history: 'intelsHistory', type: 'intels', list: true }
+    ];
+
+    NR.getFormChapterNumber = function(value) {
+        if (value && typeof value === 'object') {
+            if (Number.isSafeInteger(value.chapterNumber) && value.chapterNumber > 0) return value.chapterNumber;
+            value = value.lastUpdated || value.range || value.sourceRange || '';
+        }
+        var match = /^第\s*(\d+)\s*(?:-\s*\1\s*)?章$/.exec(String(value || '').trim());
+        var chapter = match ? Number(match[1]) : 0;
+        return Number.isSafeInteger(chapter) && chapter > 0 ? chapter : null;
+    };
+
+    NR.getFormChapterBounds = function(value) {
+        if (value && Number.isSafeInteger(value.sourceChapterStart) && Number.isSafeInteger(value.sourceChapterEnd)) {
+            return { start: value.sourceChapterStart, end: value.sourceChapterEnd };
+        }
+        var chapter = NR.getFormChapterNumber(value);
+        if (chapter !== null) return { start: chapter, end: chapter };
+        if (value && typeof value === 'object') value = value.lastUpdated || value.range || value.sourceRange || '';
+        var match = /^第\s*(\d+)\s*-\s*(\d+)\s*章$/.exec(String(value || '').trim());
+        if (!match) return null;
+        var start = Number(match[1]);
+        var end = Number(match[2]);
+        return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start > 0 && end >= start ? { start: start, end: end } : null;
+    };
+
+    NR.getAIRangeBounds = function(rangeDesc) {
+        var chapters = NR.state.chapters || [];
+        var bounds = NR.getFormChapterBounds(rangeDesc);
+        if (bounds) return { startChapter: bounds.start, endChapter: bounds.end };
+        var match = /^第\s*(\d+)\s*(?:-\s*(\d+)\s*)?页$/.exec(String(rangeDesc || '').trim());
+        if (!match) return null;
+        var start = Number(match[1]);
+        var end = Number(match[2] || match[1]);
+        var pages = NR.state.allRenderedPages || [];
+        if (start < 1 || end < start || end > pages.length) return null;
+        var indexes = [];
+        pages.slice(start - 1, end).forEach(function(page) {
+            page.querySelectorAll('p[data-original-index]').forEach(function(paragraph) {
+                var index = Number(paragraph.dataset.originalIndex);
+                if (Number.isSafeInteger(index) && index >= 0) indexes.push(index);
+            });
+        });
+        if (!indexes.length) return null;
+        var first = Math.min.apply(null, indexes);
+        var last = Math.max.apply(null, indexes);
+        var chapterAt = function(index) {
+            var found = 1;
+            chapters.forEach(function(chapter, i) { if (chapter.p_index <= index) found = chapter.chap_num || i + 1; });
+            return found;
+        };
+        return { startChapter: chapterAt(first), endChapter: chapterAt(last), startIndex: first, endIndex: last };
+    };
+
+    NR.getSelectedAIRange = function() {
+        var element = function(id) {
+            return (typeof document !== 'undefined' && document.getElementById(id)) || (NR.els && NR.els[id]);
+        };
+        var type = element('character-range-type');
+        var value = type && type.dataset ? type.dataset.value : '';
+        if (value === 'none') return '';
+        var input = element(value === 'page' ? 'character-page-range' : 'character-chapter-range');
+        if ((value === 'chapter' || value === 'page') && input && input.value) {
+            var numbers = input.value.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+            if (numbers) return '第 ' + numbers[1] + (numbers[2] ? '-' + numbers[2] : '') + (value === 'page' ? ' 页' : ' 章');
+        }
+        return NR.state.currentPage ? '第 ' + NR.state.currentPage + ' 页' : '';
+    };
+
+    NR.getAIReferenceBoundary = function(rangeDesc, includeSelected) {
+        var bounds = NR.getAIRangeBounds(rangeDesc);
+        if (!bounds) return { chapter: rangeDesc ? 1 : Infinity };
+        if (includeSelected && bounds.endIndex === undefined) return { chapter: bounds.endChapter + 1 };
+        var chapters = NR.state.chapters || [];
+        var nextChapter = chapters.find(function(chapter, index) { return (chapter.chap_num || index + 1) === bounds.endChapter + 1; });
+        var chapterEnd = nextChapter ? nextChapter.p_index : (NR.state.originalParagraphs || []).length;
+        if (includeSelected && chapterEnd > 0 && bounds.endIndex + 1 >= chapterEnd) return { chapter: bounds.endChapter + 1 };
+        return {
+            chapter: includeSelected ? bounds.endChapter : bounds.startChapter,
+            paragraph: includeSelected ? bounds.endIndex + 1 : bounds.startIndex
+        };
+    };
+
+    NR.getFormSaveScope = function(rangeDesc) {
+        var chapter = NR.getFormChapterNumber(rangeDesc);
+        if (chapter !== null) return { lastUpdated: '第 ' + chapter + ' 章', chapterNumber: chapter, formScopeKey: 'chapter:' + chapter };
+        var match = /^第\s*(\d+)\s*(?:-\s*(\d+)\s*)?页$/.exec(String(rangeDesc || '').trim());
+        if (!match) return null;
+        var scope = { lastUpdated: rangeDesc, formScopeKey: 'pages:' + Number(match[1]) + '-' + Number(match[2] || match[1]) };
+        var bounds = NR.getAIRangeBounds(rangeDesc);
+        if (bounds) {
+            scope.sourceChapterStart = bounds.startChapter;
+            scope.sourceChapterEnd = bounds.endChapter;
+            scope.sourceStartIndex = bounds.startIndex;
+            scope.sourceEndIndex = bounds.endIndex;
+            scope.formScopeKey = 'paragraphs:' + bounds.startIndex + '-' + bounds.endIndex;
+        }
+        return scope;
+    };
+
+    NR.getFormHistoryKey = function(entry) {
+        if (!entry) return null;
+        if (entry.formScopeKey) return entry.formScopeKey;
+        var chapter = NR.getFormChapterNumber(entry);
+        if (chapter !== null) return 'chapter:' + chapter;
+        var label = typeof entry === 'string' ? entry : (entry.lastUpdated || entry.range || entry.sourceRange || '');
+        return label ? 'range:' + label.replace(/\s+/g, '') : null;
+    };
+
+    NR.isScopedFormRange = function(rangeDesc) { return NR.getFormSaveScope(rangeDesc) !== null; };
+
+    NR.hasKnownFormValue = function(value) {
+        if (value === null || value === undefined) return false;
+        if (typeof value === 'string') return !/^(?:\s*|-+|未知|不详|未提及|未说明|unknown|null|undefined|n\/a)$/i.test(value.trim());
+        if (Array.isArray(value)) return value.length > 0;
+        return typeof value !== 'object' || Object.keys(value).length > 0;
+    };
+
+    // 累积参考资料和共享人物卡保留已知字段，章节快照仍原样覆盖。
+    NR.mergeKnownFormData = function(oldData, newData) {
+        var merged = Object.assign({}, oldData || {});
+        var pairFields = ['baseAttributes', 'specialAttributes', 'relationships', '基础属性', '特有属性', '人际关系'];
+        Object.keys(newData || {}).forEach(function(key) {
+            var value = newData[key];
+            if (!NR.hasKnownFormValue(value)) return;
+            if (pairFields.indexOf(key) !== -1 && NR.hasKnownFormValue(merged[key])) {
+                var pairs = NR.parseKeyValue(value);
+                if (pairs.length) {
+                    var values = new Map();
+                    NR.parseKeyValue(merged[key]).concat(pairs).forEach(function(pair) {
+                        if (NR.hasKnownFormValue(pair.value)) values.set(pair.name, pair.value);
+                    });
+                    value = NR.stringifyKeyValue(Array.from(values, function(pair) { return { name: pair[0], value: pair[1] }; }));
+                }
+            }
+            merged[key] = value;
+        });
+        return merged;
+    };
+
+    // 只收集目标章之前的资料，按章节而非保存时间排序，避免重做前章时引用后文。
+    NR.getFormHistoryRecords = function(def, beforeChapter, beforeParagraph) {
+        var bookData = NR.state.currentBookData;
+        var snapshots = new Map();
+        var records = [];
+        (bookData[def.history] || []).forEach(function(entry) {
+            var bounds = NR.getFormChapterBounds(entry);
+            if (!bounds || !NR.isAIRecordBefore(entry, { chapter: beforeChapter, paragraph: beforeParagraph })) return;
+            var key = NR.getFormHistoryKey(entry);
+            var previous = snapshots.get(key);
+            if (!previous || (entry.timestamp || 0) >= (previous.timestamp || 0)) snapshots.set(key, entry);
+        });
+        var add = function(entry, parentBounds, timestamp, parentPosition) {
+            if (!entry || !entry.data || typeof entry.data !== 'object' || Array.isArray(entry.data)) return;
+            var bounds = NR.getFormChapterBounds(entry) || parentBounds;
+            if (!bounds) return;
+            var chapter = Math.max(bounds.end, parentBounds ? parentBounds.end : 0);
+            var position = entry.sourceEndIndex === undefined ? parentPosition : entry.sourceEndIndex;
+            if (chapter >= beforeChapter && !(chapter === beforeChapter && position < beforeParagraph)) return;
+            records.push({ data: entry.data, chapter: chapter, position: position, timestamp: timestamp || entry.timestamp || 0 });
+        };
+        snapshots.forEach(function(entry) {
+            var bounds = NR.getFormChapterBounds(entry);
+            if (def.list) {
+                (Array.isArray(entry.data) ? entry.data : []).forEach(function(item) {
+                    add(item, bounds, entry.timestamp, entry.sourceEndIndex);
+                });
+            } else {
+                add(entry, bounds, entry.timestamp);
+            }
+        });
+        // 兼容只有当前记录、还没有历史快照的旧数据。
+        var current = def.list ? (bookData[def.current] || []) : [bookData[def.current]];
+        current.forEach(function(entry) {
+            var bounds = NR.getFormChapterBounds(entry);
+            if (!bounds || !NR.isAIRecordBefore(entry, { chapter: beforeChapter, paragraph: beforeParagraph })) return;
+            var covered = snapshots.has(NR.getFormHistoryKey(entry)) || Array.from(snapshots.values()).some(function(snapshot) {
+                var savedBounds = NR.getFormChapterBounds(snapshot);
+                return snapshot.sourceEndIndex === undefined && savedBounds.start <= bounds.start && savedBounds.end >= bounds.end;
+            });
+            if (!covered) add(entry, null, entry.timestamp);
+        });
+        return records.sort(function(a, b) { return a.chapter - b.chapter || (a.position === undefined ? Infinity : a.position) - (b.position === undefined ? Infinity : b.position) || a.timestamp - b.timestamp; });
+    };
+
+    NR.isAIRecordBefore = function(entry, boundary) {
+        var bounds = NR.getFormChapterBounds(entry);
+        return !!bounds && (bounds.end < boundary.chapter || (bounds.end === boundary.chapter && entry.sourceEndIndex < boundary.paragraph));
+    };
+
+    NR.isScopedFormRecord = function(entry) {
+        return !!entry && (!!entry.formScopeKey || NR.isScopedFormRange(entry.lastUpdated));
+    };
+
+    NR.collectFormReferenceData = function(boundary) {
+        var reference = {};
+        NR.FORM_DATA_TYPES.forEach(function(def) {
+            var records = NR.getFormHistoryRecords(def, boundary.chapter, boundary.paragraph);
+            var byName = new Map();
+            var single = null;
+            records.forEach(function(record) {
+                var data = record.data;
+                if (def.list) {
+                    if (!NR.hasKnownFormValue(data.name)) return;
+                    byName.set(data.name, NR.mergeKnownFormData(byName.get(data.name), data));
+                } else {
+                    if (single && def.key === 'protagonist' && single.name !== data.name) single = null;
+                    single = NR.mergeKnownFormData(single, data);
+                }
+            });
+            reference[def.current] = def.list ? Array.from(byName.values(), function(data) { return { data: data }; }) : (single ? { data: single } : null);
+        });
+        return reference;
+    };
+
+    NR.getChapterFormReferenceData = function(rangeDesc) {
+        return NR.collectFormReferenceData({ chapter: NR.getFormChapterNumber(rangeDesc) });
+    };
+
+    NR.getAIReferenceData = function(rangeDesc, includeSelected) {
+        return NR.collectFormReferenceData(NR.getAIReferenceBoundary(rangeDesc, includeSelected));
+    };
+
+    NR.buildAIReferenceContext = function(rangeDesc, includeSelected) {
+        var reference = NR.getAIReferenceData(rangeDesc, includeSelected);
+        var hasData = NR.FORM_DATA_TYPES.some(function(def) { return def.list ? reference[def.current].length : reference[def.current]; });
+        return hasData ? '【已知资料参考】\n' + JSON.stringify(reference, null, 2) + '\n仅用来统一人物设定、名称和术语；当前情节及临时状态以选定原文为准，不要添加参考资料中的其他情节。\n\n' : '';
+    };
+
+    // 从仍保留的章节历史补回人物卡中的空字段，不改动章节快照或手动填写的有效值。
+    NR.restoreCharacterProfileDetails = function() {
+        var bookData = NR.state.currentBookData;
+        var profiles = bookData.characterProfiles || [];
+        if (!profiles.length) return false;
+        var observations = [];
+        NR.FORM_DATA_TYPES.filter(function(def) { return def.key === 'protagonist' || def.key === 'npcs'; }).forEach(function(def) {
+            observations = observations.concat(NR.getFormHistoryRecords(def, Infinity));
+        });
+        observations.sort(function(a, b) { return a.chapter - b.chapter || a.timestamp - b.timestamp; });
+        var byName = new Map();
+        var knownByProfile = new Map();
+        profiles.forEach(function(profile) {
+            [profile.name].concat(profile.aliases || []).forEach(function(name) { byName.set(name, profile); });
+        });
+        observations.forEach(function(record) {
+            var profile = byName.get(record.data.name);
+            if (profile) knownByProfile.set(profile, NR.mergeKnownFormData(knownByProfile.get(profile), NR.convertFormToProfile(record.data)));
+        });
+        var changed = false;
+        profiles.forEach(function(profile) {
+            var known = knownByProfile.get(profile) || {};
+            var data = Object.assign({}, profile.data || {});
+            Object.keys(known).forEach(function(key) {
+                if (!NR.hasKnownFormValue(data[key]) && NR.hasKnownFormValue(known[key])) {
+                    data[key] = known[key];
+                    changed = true;
+                }
+            });
+            profile.data = data;
+        });
+        return changed;
+    };
+
+    // 每个章节只保留最后一次保存的快照，其他范围的历史记录保持原样。
+    NR.upsertFormHistory = function(historyKey, entry) {
+        var bookData = NR.state.currentBookData;
+        var key = NR.getFormHistoryKey(entry);
+        var history = bookData[historyKey] || [];
+        if (NR.isScopedFormRange(entry.lastUpdated) || entry.formScopeKey) {
+            history = history.filter(function(item) { return NR.getFormHistoryKey(item) !== key; });
+        }
+        history.push(JSON.parse(JSON.stringify(entry)));
+        bookData[historyKey] = history;
+    };
+
+    NR.deduplicateChapterFormHistory = function() {
+        var bookData = NR.state.currentBookData;
+        var changed = false;
+        NR.FORM_DATA_TYPES.forEach(function(def) {
+            var history = bookData[def.history] || [];
+            var latest = new Map();
+            history.forEach(function(item, index) {
+                var chapter = NR.getFormChapterNumber(item);
+                if (chapter === null) return;
+                var oldIndex = latest.get(chapter);
+                if (oldIndex === undefined || (item.timestamp || 0) >= (history[oldIndex].timestamp || 0)) {
+                    latest.set(chapter, index);
+                }
+            });
+            var unique = history.filter(function(item, index) {
+                var chapter = NR.getFormChapterNumber(item);
+                return chapter === null || latest.get(chapter) === index;
+            });
+            if (unique.length !== history.length) {
+                bookData[def.history] = unique;
+                NR.state['viewing' + def.type + 'Version'] = undefined;
+                changed = true;
+            }
+        });
+        if (changed) NR.saveBookData();
+    };
+
+    // 章节快照独立保存；空列表和空对象也要覆盖，避免遗留上次生成的数据。
+    NR.saveChapterFormData = function(data, rangeDesc, options) {
+        options = options || {};
+        var scope = NR.getFormSaveScope(rangeDesc);
+        if (!scope) throw new Error('填表数据必须属于一个章节或页码范围');
+        if (!data || typeof data !== 'object' || Array.isArray(data) || !NR.FORM_DATA_TYPES.some(function(def) {
+            return Object.prototype.hasOwnProperty.call(data, def.key);
+        })) throw new Error('AI未返回有效的章节填表数据');
+
+        var bookData = NR.state.currentBookData;
+        NR.restoreCharacterProfileDetails();
+        var label = scope.lastUpdated;
+        var timestamp = Date.now();
+        var record = function(formData) {
+            return Object.assign({ data: JSON.parse(JSON.stringify(formData)), timestamp: timestamp }, scope);
+        };
+        NR.FORM_DATA_TYPES.forEach(function(def) {
+            var history = bookData[def.history] || [];
+            var previous = history.find(function(item) { return NR.getFormHistoryKey(item) === scope.formScopeKey; });
+            var hasData = Object.prototype.hasOwnProperty.call(data, def.key);
+            var entry;
+            if (options.partial && !hasData) {
+                entry = previous || record(def.list ? [] : null);
+            } else {
+                var value = data[def.key];
+                var formData = def.list ? (Array.isArray(value) ? value : []).filter(function(item) {
+                    return item && item.name && item.name !== '-';
+                }).map(record) : (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+                if (def.key === 'protagonist' && formData && (!formData.name || formData.name === '-')) formData = null;
+                entry = record(formData);
+            }
+            NR.upsertFormHistory(def.history, entry);
+            var current = def.list ? entry.data : (entry.data ? entry : null);
+            bookData[def.current] = JSON.parse(JSON.stringify(current));
+            NR.state['viewing' + def.type + 'Version'] = undefined;
+        });
+
+        bookData.characterProfiles = bookData.characterProfiles || [];
+        if (data.protagonist && data.protagonist.name && data.protagonist.name !== '-') {
+            NR.syncProtagonistToCharacterProfiles(data.protagonist, label);
+        }
+        (Array.isArray(data.npcs) ? data.npcs : []).forEach(function(npc) {
+            if (npc && npc.name && npc.name !== '-') NR.syncNPCToCharacterProfiles(npc, label);
+        });
+
+        if (!options.partial) {
+            // 填表附带的总结和时间线同样按章替换，时间节点相同也不跨章合并。
+            bookData.summaries = (bookData.summaries || []).filter(function(item) { return NR.getFormHistoryKey(item) !== scope.formScopeKey; });
+            if (options.summaryText) bookData.summaries.push(Object.assign({ text: options.summaryText, range: label, timestamp: timestamp }, scope));
+            bookData.timelines = (bookData.timelines || []).filter(function(item) { return NR.getFormHistoryKey(item) !== scope.formScopeKey; });
+            (options.timelineModules || []).forEach(function(module) {
+                var copy = JSON.parse(JSON.stringify(module));
+                copy.range = label;
+                Object.assign(copy, scope);
+                (copy.events || []).forEach(function(event) { event.sourceRange = label; });
+                bookData.timelines.push(copy);
+            });
+            bookData.timelines = NR.sortTimelineModules(bookData.timelines);
+        }
+        return NR.saveBookData();
+    };
+
+    NR.saveChapterFormItem = function(key, formData, rangeDesc) {
+        var def = NR.FORM_DATA_TYPES.find(function(item) { return item.key === key; });
+        var scope = NR.getFormSaveScope(rangeDesc);
+        var history = NR.state.currentBookData[def.history] || [];
+        var entry = history.find(function(item) { return NR.getFormHistoryKey(item) === scope.formScopeKey; });
+        var values = entry ? entry.data.map(function(item) { return item.data; }) : [];
+        values = values.filter(function(item) { return item.name !== formData.name; });
+        values.push(formData);
+        var data = {};
+        data[key] = values;
+        return NR.saveChapterFormData(data, rangeDesc, { partial: true });
     };
     
     // 数据迁移：为已有数据创建初始历史版本
@@ -502,7 +897,7 @@
                     return;
                 }
                 
-                var context = NR.state.currentActionContext || NR.buildAIFormContextForSequel();
+                var context = NR.buildSelectedAIFormContext();
                 NR.els['character-form-choice-modal'].style.display = 'none';
                 NR.executeActionOption(action, context);
             });
@@ -544,7 +939,7 @@
                     this.classList.add('selected');
                     
                     // 使用保存的上下文执行行动
-                    var context = NR.state.currentActionContext || NR.buildAIFormContextForSequel();
+                    var context = NR.buildSelectedAIFormContext();
                     NR.els['character-form-choice-modal'].style.display = 'none';
                     NR.executeActionOption(action, context);
                 }
@@ -901,7 +1296,7 @@
                         NR.toggleNPCSelection(name);
                     } else {
                         // 非合并模式下点击查看详情
-                        NR.showCharacterDetail(name);
+                        NR.showFormCharacterDetail(name, 'npc');
                     }
                 });
             });
@@ -951,7 +1346,7 @@
                         NR.toggleProtagonistSelection(name);
                     } else {
                         // 非合并模式下点击查看详情
-                        NR.showCharacterDetail(name);
+                        NR.showFormCharacterDetail(name, 'protagonist');
                     }
                 });
             });
@@ -1203,7 +1598,7 @@
                     }
                     
                     // 自动收集AI填表数据作为上下文（包含总结）
-                    var aiFormContext = NR.buildAIFormContextForSequel(versionInfo);
+                    var aiFormContext = NR.buildAIFormContextForSequel(versionInfo, result.rangeDesc);
                     
                     // 收集用户手动选中的额外上下文（续写/翻译历史）
                     var contextList = document.getElementById('unified-context-list');
@@ -1317,7 +1712,7 @@
                         return;
                     }
                     
-                    var context = NR.state.currentActionContext || NR.buildAIFormContextForSequel();
+                    var context = NR.buildSelectedAIFormContext();
                     NR.els['character-form-choice-modal'].style.display = 'none';
                     NR.executeActionOption(action, context);
                 });
@@ -1894,7 +2289,7 @@
         }
         
         var currentIdx = NR.state['viewing' + dataType + 'Version'];
-        if (currentIdx === undefined || currentIdx === null) {
+        if (currentIdx === undefined || currentIdx === null || currentIdx < 0 || currentIdx >= historyArray.length) {
             currentIdx = historyArray.length - 1; // 默认显示最新版本
         }
         
@@ -1930,7 +2325,7 @@
             return NR.state.currentBookData[currentKey];
         }
         
-        if (viewingIdx === undefined || viewingIdx === null || viewingIdx >= history.length) {
+        if (viewingIdx === undefined || viewingIdx === null || viewingIdx < 0 || viewingIdx >= history.length) {
             viewingIdx = history.length - 1;
         }
         
@@ -1992,12 +2387,17 @@
         
         // 如果在查看历史版本
         var viewingIdx = NR.state['viewingprotagonistVersion'];
-        if (!mergeMode && history.length > 0 && viewingIdx !== undefined && viewingIdx < history.length - 1) {
-            var historyData = history[viewingIdx];
+        if (!mergeMode && history.length > 0 && (NR.isScopedFormRecord(NR.getViewingVersionData('protagonist')) || (viewingIdx !== undefined && viewingIdx < history.length - 1))) {
+            var historyData = NR.getViewingVersionData('protagonist');
+            if (historyData && !historyData.data) {
+                return html + '<div class="tab-empty"><p>该章节暂无主角数据</p></div></div>';
+            }
             if (historyData && historyData.data) {
-                html += '<div class="history-version-notice" style="padding: 10px; background: rgba(255,193,7,0.2); border-radius: 8px; margin-bottom: 10px;">';
-                html += '<strong>📜 查看历史版本:</strong> ' + NR.escapeHtml(historyData.lastUpdated || '未知');
-                html += '</div>';
+                if (!NR.isScopedFormRecord(historyData)) {
+                    html += '<div class="history-version-notice" style="padding: 10px; background: rgba(255,193,7,0.2); border-radius: 8px; margin-bottom: 10px;">';
+                    html += '<strong>📜 查看历史版本:</strong> ' + NR.escapeHtml(historyData.lastUpdated || '未知');
+                    html += '</div>';
+                }
                 
                 // 显示历史版本的主角数据（使用卡片样式）
                 var pd = historyData.data;
@@ -2178,13 +2578,15 @@
         var viewingIdx = NR.state['viewingnpcVersion'];
         var isViewingHistory = false;
         
-        if (!mergeMode && history.length > 0 && viewingIdx !== undefined && viewingIdx < history.length - 1) {
-            var historyData = history[viewingIdx];
+        if (!mergeMode && history.length > 0 && (NR.isScopedFormRecord(NR.getViewingVersionData('npc')) || (viewingIdx !== undefined && viewingIdx < history.length - 1))) {
+            var historyData = NR.getViewingVersionData('npc');
             if (historyData && historyData.data) {
                 isViewingHistory = true;
-                html += '<div class="history-version-notice" style="padding: 10px; background: rgba(255,193,7,0.2); border-radius: 8px; margin-bottom: 10px;">';
-                html += '<strong>📜 查看历史版本:</strong> ' + NR.escapeHtml(historyData.lastUpdated || '未知');
-                html += '</div>';
+                if (!NR.isScopedFormRecord(historyData)) {
+                    html += '<div class="history-version-notice" style="padding: 10px; background: rgba(255,193,7,0.2); border-radius: 8px; margin-bottom: 10px;">';
+                    html += '<strong>📜 查看历史版本:</strong> ' + NR.escapeHtml(historyData.lastUpdated || '未知');
+                    html += '</div>';
+                }
                 
                 // 显示历史版本的NPC数据（使用与当前版本相同的卡片样式）
                 var historyNPCs = historyData.data || [];
@@ -2914,6 +3316,8 @@
     // 显示数据项详情
     NR.showDataItemDetail = function(type, index) {
         var dataArrayMap = {
+            'npc': NR.state.currentBookData.importantNPCs,
+            'protagonist': NR.state.currentBookData.protagonistInfo ? [NR.state.currentBookData.protagonistInfo] : [],
             'skill': NR.state.currentBookData.skills,
             'item': NR.state.currentBookData.items,
             'quest': NR.state.currentBookData.quests,
@@ -2923,6 +3327,8 @@
             'intel': NR.state.currentBookData.intels
         };
         var fieldsMap = {
+            'npc': NR.NPC_FIELDS,
+            'protagonist': NR.PROTAGONIST_FIELDS,
             'skill': NR.SKILL_FIELDS,
             'item': NR.ITEM_FIELDS,
             'quest': NR.QUEST_FIELDS,
@@ -2932,6 +3338,8 @@
             'intel': NR.INTEL_FIELDS
         };
         var titleMap = {
+            'npc': '人物详情',
+            'protagonist': '主角详情',
             'skill': '⚔️ 技能详情',
             'item': '🎒 物品详情',
             'quest': '📜 任务详情',
@@ -2942,6 +3350,15 @@
         };
 
         var dataArray = dataArrayMap[type] || [];
+        var dataType = type === 'npc' || type === 'protagonist' ? type : type + 's';
+        var history = NR.state.currentBookData[dataType + 'History'] || [];
+        if (history.length) {
+            var selected = NR.getViewingVersionData(dataType);
+            var viewingIdx = NR.state['viewing' + dataType + 'Version'];
+            if (NR.isScopedFormRecord(selected) || (viewingIdx !== undefined && viewingIdx < history.length - 1)) {
+                dataArray = type === 'protagonist' ? (selected.data ? [selected] : []) : (selected.data || []);
+            }
+        }
         var fields = fieldsMap[type] || [];
         var record = dataArray[index];
         if (!record) return;
@@ -2972,6 +3389,14 @@
         modal.querySelector('.close-button').addEventListener('click', function() { modal.remove(); });
         modal.querySelector('.btn-back-list').addEventListener('click', function() { modal.remove(); });
         modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+    };
+
+    NR.showFormCharacterDetail = function(name, type) {
+        var entry = NR.getViewingVersionData(type);
+        if (!NR.isScopedFormRecord(entry)) return NR.showCharacterDetail(name);
+        var records = type === 'protagonist' ? [entry] : entry.data;
+        var index = records.findIndex(function(item) { return item.data && item.data.name === name; });
+        if (index >= 0) NR.showDataItemDetail(type, index);
     };
 
     // 删除数据项
@@ -3006,6 +3431,10 @@
         if (!confirm('确定要删除"' + name + '"吗？')) return;
 
         dataArray.splice(index, 1);
+        if (NR.isScopedFormRecord(record)) {
+            NR.upsertFormHistory(key + 'History', Object.assign({}, record, { data: dataArray, timestamp: Date.now() }));
+            NR.state['viewing' + key + 'Version'] = undefined;
+        }
         NR.saveBookData();
         NR.renderDataBrowserTab(tabMap[type]);
     };
@@ -3154,6 +3583,56 @@
         });
     };
 
+    // 多章填表逐章请求并立即保存，上一章完成后才开始下一章。
+    NR.generateChapterCharacterForms = async function(start, end) {
+        if (NR.state.generatingChapterForms) return;
+        var bookData = NR.state.currentBookData;
+        var fileName = NR.state.currentFileName;
+        var button = NR.els['btn-generate-all-characters'];
+        var loader = NR.els['app-loader'];
+        var completed = 0;
+        var chapter = start;
+        NR.state.generatingChapterForms = true;
+        button.disabled = true;
+        NR.els['character-form-choice-modal'].style.display = 'none';
+        loader.classList.remove('hidden');
+        try {
+            for (; chapter <= end; chapter++) {
+                if (NR.state.currentBookData !== bookData || NR.state.currentFileName !== fileName) {
+                    throw new Error('当前书籍已切换，已停止生成');
+                }
+                var text = NR.getTextForChapter(chapter);
+                var rangeDesc = '第 ' + chapter + ' 章';
+                if (!text || !text.trim()) throw new Error(rangeDesc + '没有可分析的正文');
+                loader.querySelector('span').textContent = '正在生成' + rangeDesc + '（' + (completed + 1) + '/' + (end - start + 1) + '）...';
+                var results = await Promise.all([
+                    NR.callAIForForm(NR.buildAllDataPrompt(text, rangeDesc)),
+                    NR.generateSummaryForFillForm(text, rangeDesc),
+                    NR.generateTimelineForFillForm(text, rangeDesc)
+                ]);
+                if (NR.state.currentBookData !== bookData || NR.state.currentFileName !== fileName) {
+                    throw new Error('当前书籍已切换，已停止生成');
+                }
+                await NR.saveChapterFormData(results[0], rangeDesc, { summaryText: results[1], timelineModules: results[2] });
+                completed++;
+            }
+            alert('已生成并保存 ' + completed + ' 个章节的填表数据。');
+        } catch (err) {
+            console.error('[AI数据库] 章节填表失败:', err);
+            alert('已保存 ' + completed + ' 个章节。第 ' + chapter + ' 章生成失败：' + err.message);
+        } finally {
+            NR.state.generatingChapterForms = false;
+            button.disabled = false;
+            loader.classList.add('hidden');
+            loader.querySelector('span').textContent = '正在加载...';
+            if (NR.state.currentBookData === bookData && NR.state.currentFileName === fileName) {
+                NR.els['character-form-choice-modal'].style.display = 'flex';
+                NR.initEmbeddedDataBrowser();
+            }
+        }
+        return completed;
+    };
+
     // 一键生成所有人物表单（主角+重要人物）
     NR.generateAllCharacterForms = function(text, rangeDesc) {
         console.log('[AI数据库] 开始生成，文本长度:', text ? text.length : 0);
@@ -3168,7 +3647,7 @@
         NR.els['app-loader'].querySelector('span').textContent = '正在分析数据...';
 
         console.log('[AI数据库] 构建提示词...');
-        var prompt = NR.buildAllDataPrompt(text);
+        var prompt = NR.buildAllDataPrompt(text, rangeDesc);
         console.log('[AI数据库] 提示词长度:', prompt.length);
 
         // 同时生成总结和剧情时间线
@@ -3331,50 +3810,31 @@
     // 构建续写用的AI填表上下文（包含所有已有数据和总结）
     // versionInfo: 可选，指定使用哪个历史版本的数据
     // 当选择历史版本时，只使用该版本存在的数据，不回退到当前版本
-    NR.buildAIFormContextForSequel = function(versionInfo) {
+    NR.buildAIFormContextForSequel = function(versionInfo, rangeDesc) {
         var contextParts = [];
-        var bookData = NR.state.currentBookData;
-        
-        // 获取数据源（当前版本或历史版本）
-        var globalData, protagonistData, npcs, skills, items, quests, locations, equipments, factions, intels;
-        
+        if (rangeDesc === undefined) rangeDesc = NR.getSelectedAIRange();
+        var boundary = NR.getAIReferenceBoundary(rangeDesc, true);
         if (versionInfo) {
-            // 使用历史版本数据 - 只使用该版本存在的数据
-            var gh = bookData.globalDataHistory || [];
-            var ph = bookData.protagonistHistory || [];
-            var nh = bookData.npcHistory || [];
-            var skh = bookData.skillsHistory || [];
-            var ith = bookData.itemsHistory || [];
-            var qh = bookData.questsHistory || [];
-            var lh = bookData.locationsHistory || [];
-            var eh = bookData.equipmentsHistory || [];
-            var fh = bookData.factionsHistory || [];
-            var inh = bookData.intelsHistory || [];
-            
-            // 只使用历史版本中存在的数据，不回退到当前版本
-            globalData = versionInfo.globalDataIdx >= 0 && gh[versionInfo.globalDataIdx] ? gh[versionInfo.globalDataIdx] : null;
-            protagonistData = versionInfo.protagonistIdx >= 0 && ph[versionInfo.protagonistIdx] ? ph[versionInfo.protagonistIdx] : null;
-            npcs = versionInfo.npcIdx >= 0 && nh[versionInfo.npcIdx] ? nh[versionInfo.npcIdx].data : [];
-            skills = versionInfo.skillsIdx >= 0 && skh[versionInfo.skillsIdx] ? skh[versionInfo.skillsIdx].data : [];
-            items = versionInfo.itemsIdx >= 0 && ith[versionInfo.itemsIdx] ? ith[versionInfo.itemsIdx].data : [];
-            quests = versionInfo.questsIdx >= 0 && qh[versionInfo.questsIdx] ? qh[versionInfo.questsIdx].data : [];
-            locations = versionInfo.locationsIdx >= 0 && lh[versionInfo.locationsIdx] ? lh[versionInfo.locationsIdx].data : [];
-            equipments = versionInfo.equipmentsIdx >= 0 && eh[versionInfo.equipmentsIdx] ? eh[versionInfo.equipmentsIdx].data : [];
-            factions = versionInfo.factionsIdx >= 0 && fh[versionInfo.factionsIdx] ? fh[versionInfo.factionsIdx].data : [];
-            intels = versionInfo.intelsIdx >= 0 && inh[versionInfo.intelsIdx] ? inh[versionInfo.intelsIdx].data : [];
-        } else {
-            // 使用当前版本数据
-            globalData = bookData.globalData;
-            protagonistData = bookData.protagonistInfo;
-            npcs = bookData.importantNPCs || [];
-            skills = bookData.skills || [];
-            items = bookData.items || [];
-            quests = bookData.quests || [];
-            locations = bookData.locations || [];
-            equipments = bookData.equipments || [];
-            factions = bookData.factions || [];
-            intels = bookData.intels || [];
+            var versionBoundary = NR.getAIReferenceBoundary(versionInfo.label, true);
+            NR.FORM_DATA_TYPES.some(function(def) {
+                var entry = (NR.state.currentBookData[def.history] || [])[versionInfo[def.type + 'Idx']];
+                if (!entry || !Number.isSafeInteger(entry.sourceEndIndex)) return false;
+                versionBoundary = { chapter: entry.sourceChapterEnd, paragraph: entry.sourceEndIndex + 1 };
+                return true;
+            });
+            if (versionBoundary.chapter < boundary.chapter || (versionBoundary.chapter === boundary.chapter && (versionBoundary.paragraph || Infinity) < (boundary.paragraph || Infinity))) boundary = versionBoundary;
         }
+        var bookData = NR.collectFormReferenceData(boundary);
+        var globalData = bookData.globalData;
+        var protagonistData = bookData.protagonistInfo;
+        var npcs = bookData.importantNPCs;
+        var skills = bookData.skills;
+        var items = bookData.items;
+        var quests = bookData.quests;
+        var locations = bookData.locations;
+        var equipments = bookData.equipments;
+        var factions = bookData.factions;
+        var intels = bookData.intels;
         
         // 1. 全局数据
         if (globalData && globalData.data) {
@@ -3537,8 +3997,8 @@
             contextParts.push(intelsText.trim());
         }
         
-        // 11. 总结历史（总结不受版本选择影响，始终使用全部）
-        var summaries = bookData.summaries || [];
+        // 总结和填表使用同一阅读边界。
+        var summaries = (NR.state.currentBookData.summaries || []).filter(function(item) { return NR.isAIRecordBefore(item, boundary); });
         if (summaries.length > 0) {
             var summariesText = '【故事总结】\n';
             // 按范围排序
@@ -3558,18 +4018,36 @@
         return '请参考以下故事背景信息进行续写：\n\n' + contextParts.join('\n\n---\n\n') + '\n\n---\n\n';
     };
 
+    NR.buildSelectedAIFormContext = function(rangeDesc) {
+        var dropdown = typeof document !== 'undefined' ? document.getElementById('unified-data-version') : null;
+        var version = dropdown && dropdown.dataset.value !== 'current' ? NR.collectAllHistoryVersions()[Number(dropdown.dataset.value)] : null;
+        var context = NR.buildAIFormContextForSequel(version, rangeDesc);
+        var list = typeof document !== 'undefined' ? document.getElementById('unified-context-list') : null;
+        var order = NR.state.tabContextCheckOrder || [];
+        if (list) Array.from(list.querySelectorAll('input[type="checkbox"]:checked')).sort(function(a, b) {
+            var aIndex = order.indexOf(a.dataset.contextType + '_' + a.dataset.contextIndex);
+            var bIndex = order.indexOf(b.dataset.contextType + '_' + b.dataset.contextIndex);
+            return (aIndex < 0 ? Infinity : aIndex) - (bIndex < 0 ? Infinity : bIndex);
+        }).forEach(function(input) {
+            if (input.dataset.contextType !== 'Summary') context += '\n【手动选择的参考】\n' + input.value + '\n';
+        });
+        return context;
+    };
+
     // 构建一键生成提示词（全局数据+人物+技能+背包+任务+地点+装备+势力+情报）
-    NR.buildAllDataPrompt = function(text) {
-        var existingGlobal = NR.state.currentBookData.globalData;
-        var existingProtag = NR.state.currentBookData.protagonistInfo;
-        var existingNPCs = NR.state.currentBookData.importantNPCs || [];
-        var existingSkills = NR.state.currentBookData.skills || [];
-        var existingItems = NR.state.currentBookData.items || [];
-        var existingQuests = NR.state.currentBookData.quests || [];
-        var existingLocations = NR.state.currentBookData.locations || [];
-        var existingEquipments = NR.state.currentBookData.equipments || [];
-        var existingFactions = NR.state.currentBookData.factions || [];
-        var existingIntels = NR.state.currentBookData.intels || [];
+    NR.buildAllDataPrompt = function(text, rangeDesc) {
+        var independent = NR.isScopedFormRange(rangeDesc);
+        var bookData = independent ? NR.getAIReferenceData(rangeDesc, false) : NR.state.currentBookData;
+        var existingGlobal = bookData.globalData;
+        var existingProtag = bookData.protagonistInfo;
+        var existingNPCs = bookData.importantNPCs || [];
+        var existingSkills = bookData.skills || [];
+        var existingItems = bookData.items || [];
+        var existingQuests = bookData.quests || [];
+        var existingLocations = bookData.locations || [];
+        var existingEquipments = bookData.equipments || [];
+        var existingFactions = bookData.factions || [];
+        var existingIntels = bookData.intels || [];
         var existingContext = '';
         
         if (existingGlobal) {
@@ -3704,9 +4182,14 @@
             '\n- related: 关联事项' +
             '\n- status: 情报状态（"新获得"/"调查中"/"已利用"/"已过时"）' +
             '\n\n规则：' +
-            '\n1. 如果某个字段在文本中没有明确信息，填写"-"' +
-            '\n2. 如果某类数据完全没有，返回空数组[]或null' +
-            '\n3. 请在已有数据基础上补充或更新，同名数据合并信息' +
+            (independent ?
+                '\n1. 以本章原文为准，参考此前章节资料识别人名、身份、关系及同名条目。本章未重述的已知且仍适用的信息可以补全；原文与参考资料都没有的信息填写"-"，不要猜测。' +
+                '\n2. 仅返回本章出现、提及或明确发生状态变化的条目，不要把所有历史人物、技能、物品、任务、地点、装备、势力和情报复制到本章。某类数据在本章完全没有时返回空数组[]或null。' +
+                '\n3. 本章明确的新事实覆盖历史信息。外貌、身份、能力、关系等可参考已知资料；时间、地点、衣着、在场状态及物品持有情况等临时状态需要本章证据，不要直接沿用旧状态。' +
+                '\n4. 以下资料仅来自' + rangeDesc + '之前已保存的章节，用于参考；本次仍只生成' + rangeDesc + '的一份独立填表数据。' :
+                '\n1. 如果某个字段在文本中没有明确信息，填写"-"' +
+                '\n2. 如果某类数据完全没有，返回空数组[]或null' +
+                '\n3. 请在已有数据基础上补充或更新，同名数据合并信息') +
             existingContext +
             '\n\n---\n\n' + text +
             '\n\n请只返回JSON对象：{"globalData": {...}, "protagonist": {...}, "npcs": [...], "skills": [...], "items": [...], "quests": [...], "locations": [...], "equipments": [...], "factions": [...], "intels": [...]}';
@@ -3759,20 +4242,22 @@
             ', 势力=' + factions.length + ', 情报=' + intels.length);
         
         console.log('[AI数据库] 开始合并已有数据...');
-        
+
+        // 章节填表直接使用本章结果。
+        var existingBookData = NR.isScopedFormRange(rangeDesc) ? {} : NR.state.currentBookData;
         // 预先合并已有数据
         try {
-            var existingGlobal = NR.state.currentBookData.globalData;
+            var existingGlobal = existingBookData.globalData;
             if (globalData && existingGlobal && existingGlobal.data) {
                 globalData = NR.mergeFormData(existingGlobal.data, globalData);
             }
 
-            var existingProtag = NR.state.currentBookData.protagonistInfo;
+            var existingProtag = existingBookData.protagonistInfo;
             if (protagonist && protagonist.name && protagonist.name !== '-' && existingProtag && existingProtag.data) {
                 protagonist = NR.mergeFormData(existingProtag.data, protagonist);
             }
             
-            var existingNPCs = NR.state.currentBookData.importantNPCs || [];
+            var existingNPCs = existingBookData.importantNPCs || [];
             npcs = npcs.map(function(npc) {
                 if (!npc || !npc.name || npc.name === '-') return npc;
                 var existingNPC = existingNPCs.find(function(e) { return e.data && e.data.name === npc.name; });
@@ -3782,7 +4267,7 @@
                 return npc;
             });
 
-            var existingSkills = NR.state.currentBookData.skills || [];
+            var existingSkills = existingBookData.skills || [];
             skills = skills.map(function(skill) {
                 if (!skill || !skill.name || skill.name === '-') return skill;
                 var existing = existingSkills.find(function(e) { return e.data && e.data.name === skill.name; });
@@ -3790,7 +4275,7 @@
                 return skill;
             });
 
-            var existingItems = NR.state.currentBookData.items || [];
+            var existingItems = existingBookData.items || [];
             items = items.map(function(item) {
                 if (!item || !item.name || item.name === '-') return item;
                 var existing = existingItems.find(function(e) { return e.data && e.data.name === item.name; });
@@ -3804,7 +4289,7 @@
         }
 
         try {
-            var existingQuests = NR.state.currentBookData.quests || [];
+            var existingQuests = existingBookData.quests || [];
             quests = quests.map(function(quest) {
                 if (!quest || !quest.name || quest.name === '-') return quest;
                 var existing = existingQuests.find(function(e) { return e.data && e.data.name === quest.name; });
@@ -3812,7 +4297,7 @@
                 return quest;
             });
 
-            var existingLocations = NR.state.currentBookData.locations || [];
+            var existingLocations = existingBookData.locations || [];
             locations = locations.map(function(loc) {
                 if (!loc || !loc.name || loc.name === '-') return loc;
                 var existing = existingLocations.find(function(e) { return e.data && e.data.name === loc.name; });
@@ -3820,7 +4305,7 @@
                 return loc;
             });
 
-            var existingEquipments = NR.state.currentBookData.equipments || [];
+            var existingEquipments = existingBookData.equipments || [];
             equipments = equipments.map(function(eq) {
                 if (!eq || !eq.name || eq.name === '-') return eq;
                 var existing = existingEquipments.find(function(e) { return e.data && e.data.name === eq.name; });
@@ -3828,7 +4313,7 @@
                 return eq;
             });
 
-            var existingFactions = NR.state.currentBookData.factions || [];
+            var existingFactions = existingBookData.factions || [];
             factions = factions.map(function(fac) {
                 if (!fac || !fac.name || fac.name === '-') return fac;
                 var existing = existingFactions.find(function(e) { return e.data && e.data.name === fac.name; });
@@ -3836,7 +4321,7 @@
                 return fac;
             });
 
-            var existingIntels = NR.state.currentBookData.intels || [];
+            var existingIntels = existingBookData.intels || [];
             intels = intels.map(function(intel) {
                 if (!intel || !intel.name || intel.name === '-') return intel;
                 var existing = existingIntels.find(function(e) { return e.data && e.data.name === intel.name; });
@@ -4086,7 +4571,6 @@
                     '<div class="timeline-form-module">' +
                         '<div class="timeline-form-module-header">' +
                             '<strong>' + NR.escapeHtml(module.timeNode || module.range || '时间节点') + '</strong>' +
-                            '<span>' + NR.escapeHtml(module.range || rangeDesc) + ' · ' + events.length + ' 个事件</span>' +
                         '</div>' +
                         (module.summary ? '<p class="timeline-form-summary">' + NR.escapeHtml(module.summary) + '</p>' : '') +
                         '<div class="timeline-form-events">';
@@ -4238,7 +4722,7 @@
         // 批量保存各类数据
         modal.querySelectorAll('.btn-save-section').forEach(function(btn) {
             var section = btn.dataset.section;
-            if (section === 'protagonist') return; // 已单独处理
+            if (section === 'protagonist' || section === 'globalData') return; // 已单独处理
             
             btn.addEventListener('click', function() {
                 var type, fields, saveFunc;
@@ -4267,6 +4751,19 @@
                     type = 'intel'; fields = NR.INTEL_FIELDS;
                     saveFunc = function(data) { NR.saveIntelData(data, rangeDesc); };
                 }
+
+                if (NR.isScopedFormRange(rangeDesc)) {
+                    var sectionData = {};
+                    sectionData[section] = [];
+                    modal.querySelectorAll('.npc-form-card[data-type="' + type + '"]').forEach(function(card) {
+                        var formData = NR.collectFormData(card, fields, type + '-' + card.dataset.index);
+                        if (formData.name && formData.name !== '-') sectionData[section].push(formData);
+                    });
+                    NR.saveChapterFormData(sectionData, rangeDesc, { partial: true });
+                    this.textContent = '已保存 ✓';
+                    this.disabled = true;
+                    return;
+                }
                 
                 var savedCount = 0;
                 modal.querySelectorAll('.npc-form-card[data-type="' + type + '"]').forEach(function(card) {
@@ -4284,6 +4781,32 @@
 
         // 全部保存
         document.getElementById('btn-save-all-characters').addEventListener('click', function() {
+            if (NR.isScopedFormRange(rangeDesc)) {
+                var chapterData = {
+                    globalData: globalData ? NR.collectFormData(modal, NR.GLOBAL_DATA_FIELDS, 'global') : null,
+                    protagonist: protagonist ? NR.collectFormData(modal, NR.PROTAGONIST_FIELDS, 'protag') : null
+                };
+                [
+                    ['npcs', 'npc', NR.NPC_FIELDS], ['skills', 'skill', NR.SKILL_FIELDS],
+                    ['items', 'item', NR.ITEM_FIELDS], ['quests', 'quest', NR.QUEST_FIELDS],
+                    ['locations', 'location', NR.LOCATION_FIELDS], ['equipments', 'equipment', NR.EQUIPMENT_FIELDS],
+                    ['factions', 'faction', NR.FACTION_FIELDS], ['intels', 'intel', NR.INTEL_FIELDS]
+                ].forEach(function(def) {
+                    chapterData[def[0]] = [];
+                    modal.querySelectorAll('.npc-form-card[data-type="' + def[1] + '"]').forEach(function(card) {
+                        chapterData[def[0]].push(NR.collectFormData(card, def[2], def[1] + '-' + card.dataset.index));
+                    });
+                });
+                NR.saveChapterFormData(chapterData, rangeDesc, {
+                    summaryText: NR.state.pendingFillFormSummary,
+                    timelineModules: NR.state.pendingFillFormTimeline || []
+                });
+                NR.state.pendingFillFormSummary = null;
+                NR.state.pendingFillFormTimeline = null;
+                alert(rangeDesc + '的填表数据已保存！');
+                modal.remove();
+                return;
+            }
             var msg = [];
             
             // 保存全局数据（跳过单独的历史保存，最后统一保存）
@@ -4438,6 +4961,9 @@
 
     // 保存全局数据（不自动保存历史，由saveAllDataSnapshot统一处理）
     NR.saveGlobalData = function(formData, rangeDesc, skipHistory) {
+        if (NR.isScopedFormRange(rangeDesc)) {
+            return NR.saveChapterFormData({ globalData: formData }, rangeDesc, { partial: true });
+        }
         var finalData = formData;
         var existingData = NR.state.currentBookData.globalData;
         
@@ -4466,6 +4992,7 @@
 
     // 保存地点数据
     NR.saveLocationData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('locations', formData, rangeDesc);
         if (!NR.state.currentBookData.locations) {
             NR.state.currentBookData.locations = [];
         }
@@ -4484,6 +5011,7 @@
 
     // 保存装备数据
     NR.saveEquipmentData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('equipments', formData, rangeDesc);
         if (!NR.state.currentBookData.equipments) {
             NR.state.currentBookData.equipments = [];
         }
@@ -4502,6 +5030,7 @@
 
     // 保存势力数据
     NR.saveFactionData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('factions', formData, rangeDesc);
         if (!NR.state.currentBookData.factions) {
             NR.state.currentBookData.factions = [];
         }
@@ -4520,6 +5049,7 @@
 
     // 保存情报数据
     NR.saveIntelData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('intels', formData, rangeDesc);
         if (!NR.state.currentBookData.intels) {
             NR.state.currentBookData.intels = [];
         }
@@ -4538,6 +5068,7 @@
 
     // 保存技能数据
     NR.saveSkillData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('skills', formData, rangeDesc);
         if (!NR.state.currentBookData.skills) {
             NR.state.currentBookData.skills = [];
         }
@@ -4556,6 +5087,7 @@
 
     // 保存物品数据
     NR.saveItemData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('items', formData, rangeDesc);
         if (!NR.state.currentBookData.items) {
             NR.state.currentBookData.items = [];
         }
@@ -4574,6 +5106,7 @@
 
     // 保存任务数据
     NR.saveQuestData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('quests', formData, rangeDesc);
         if (!NR.state.currentBookData.quests) {
             NR.state.currentBookData.quests = [];
         }
@@ -4607,7 +5140,7 @@
             lastUpdated: rangeDesc,
             timestamp: Date.now()
         };
-        NR.state.currentBookData[historyKey].push(snapshot);
+        NR.upsertFormHistory(historyKey, snapshot);
     };
     
     // 一键保存所有数据时保存快照
@@ -4617,7 +5150,7 @@
             if (!NR.state.currentBookData.globalDataHistory) {
                 NR.state.currentBookData.globalDataHistory = [];
             }
-            NR.state.currentBookData.globalDataHistory.push(NR.state.currentBookData.globalData);
+            NR.upsertFormHistory('globalDataHistory', NR.state.currentBookData.globalData);
         }
         
         // 保存主角数据快照
@@ -4625,7 +5158,7 @@
             if (!NR.state.currentBookData.protagonistHistory) {
                 NR.state.currentBookData.protagonistHistory = [];
             }
-            NR.state.currentBookData.protagonistHistory.push(NR.state.currentBookData.protagonistInfo);
+            NR.upsertFormHistory('protagonistHistory', NR.state.currentBookData.protagonistInfo);
         }
         
         // 保存各类列表数据的快照
@@ -4742,7 +5275,7 @@
 
     NR.normalizeTimelineModules = function(data, rangeDesc) {
         data = data || {};
-        var bookData = NR.state.currentBookData || {};
+        var bookData = rangeDesc ? NR.getAIReferenceData(rangeDesc, false) : (NR.state.currentBookData || {});
         var gd = bookData.globalData && bookData.globalData.data ? bookData.globalData.data : {};
         var sourceTime = gd.currentTime || gd.lastSceneTime || '';
         var rawModules = [];
@@ -4797,46 +5330,48 @@
         return titleA && titleA === titleB && summaryA === summaryB;
     };
 
-    NR.saveTimelineModules = function(modules, rangeDesc, skipSave) {
-        modules = modules || [];
-        if (!modules.length) return 0;
-        NR.state.currentBookData.timelines = NR.state.currentBookData.timelines || [];
-        var savedCount = 0;
-
-        modules.forEach(function(module) {
-            module = NR.normalizeTimelineModules(module.modules ? module : { modules: [module] }, rangeDesc || module.range)[0];
-            if (!module) return;
-            var existing = NR.state.currentBookData.timelines.find(function(item) {
-                var sameNode = item.timeNode && module.timeNode && item.timeNode === module.timeNode;
-                var sameRange = item.range && module.range && item.range === module.range;
-                return sameNode || (!item.timeNode && sameRange);
+    // 旧版曾把不同章节的同名节点合并，按事件保留的来源章节拆回独立模块。
+    NR.repairTimelineScopes = function(modules) {
+        var repaired = [];
+        (modules || []).forEach(function(module) {
+            var chapter = NR.getFormChapterNumber(module.range);
+            if (chapter === null) { repaired.push(module); return; }
+            var groups = new Map();
+            (module.events || []).forEach(function(event) {
+                var source = NR.getFormChapterNumber(event.sourceRange) || chapter;
+                if (!groups.has(source)) groups.set(source, []);
+                groups.get(source).push(event);
             });
-
-            if (existing) {
-                existing.timeNode = existing.timeNode || module.timeNode;
-                existing.timeOrder = typeof existing.timeOrder === 'number' ? existing.timeOrder : module.timeOrder;
-                existing.range = existing.range || module.range;
-                if (module.summary) existing.summary = module.summary;
-                existing.events = existing.events || [];
-                module.events.forEach(function(event) {
-                    var duplicate = existing.events.some(function(oldEvent) {
-                        return NR.isTimelineEventDuplicate(oldEvent, event);
-                    });
-                    if (!duplicate) {
-                        existing.events.push(event);
-                        savedCount++;
-                    }
+            if (!groups.size || (groups.size === 1 && groups.has(chapter))) { repaired.push(module); return; }
+            groups.forEach(function(events, source) {
+                var copy = Object.assign({}, module, NR.getFormSaveScope('第 ' + source + ' 章'), {
+                    range: '第 ' + source + ' 章', summary: '', legacySummary: module.legacySummary || module.summary || '',
+                    events: JSON.parse(JSON.stringify(events))
                 });
-                existing.timestamp = Date.now();
-            } else {
-                NR.state.currentBookData.timelines.push(module);
-                savedCount += module.events.length || 1;
-            }
+                copy.timeNode = (module.timeNode || '').replace(/^第\s*\d+\s*章/, '第' + source + '章');
+                copy.events.forEach(function(event) { event.sourceRange = copy.range; });
+                repaired.push(copy);
+            });
         });
+        return repaired;
+    };
 
-        NR.state.currentBookData.timelines = NR.sortTimelineModules(NR.state.currentBookData.timelines);
+    NR.saveTimelineModules = function(modules, rangeDesc, skipSave) {
+        var scope = NR.getFormSaveScope(rangeDesc) || { lastUpdated: rangeDesc };
+        var key = NR.getFormHistoryKey(scope);
+        var normalized = [];
+        (modules || []).forEach(function(module) {
+            NR.normalizeTimelineModules(module.modules ? module : { modules: [module] }, rangeDesc).forEach(function(item) {
+                Object.assign(item, scope);
+                item.range = rangeDesc;
+                item.events.forEach(function(event) { event.sourceRange = rangeDesc; });
+                normalized.push(item);
+            });
+        });
+        var remaining = NR.repairTimelineScopes(NR.state.currentBookData.timelines).filter(function(item) { return NR.getFormHistoryKey(item) !== key; });
+        NR.state.currentBookData.timelines = NR.sortTimelineModules(remaining.concat(normalized));
         if (!skipSave) NR.saveBookData();
-        return savedCount;
+        return normalized.reduce(function(count, module) { return count + module.events.length; }, 0);
     };
 
     NR.formatTimelineModuleForPrompt = function(module, index) {
@@ -4901,25 +5436,22 @@
     };
 
     NR.getPreviousRecordsByRange = function(records, rangeDesc, rangeKey) {
-        var currentStart = NR.getRangeStartForTimeline(rangeDesc);
-        records = records || [];
-        if (!isFinite(currentStart)) {
-            return records.slice().sort(function(a, b) {
-                return (a.timestamp || 0) - (b.timestamp || 0);
+        var boundary = NR.getAIReferenceBoundary(rangeDesc, false);
+        return (records || []).filter(function(item) {
+            var source = Object.assign({}, item, { range: item[rangeKey] || item.range || item.sourceRange });
+            if (!NR.isAIRecordBefore(source, boundary)) return false;
+            return (item.events || []).every(function(event) {
+                return !NR.getFormChapterBounds(event.sourceRange) || NR.isAIRecordBefore({ range: event.sourceRange }, boundary);
             });
-        }
-        return records.filter(function(item) {
-            var itemStart = NR.getRangeStartForTimeline(item[rangeKey] || item.range || item.sourceRange);
-            return isFinite(itemStart) && itemStart < currentStart;
         }).sort(function(a, b) {
-            return NR.getRangeStartForTimeline(a[rangeKey] || a.range || a.sourceRange) - NR.getRangeStartForTimeline(b[rangeKey] || b.range || b.sourceRange);
+            return NR.getFormChapterBounds(a).end - NR.getFormChapterBounds(b).end || (a.timestamp || 0) - (b.timestamp || 0);
         });
     };
 
     NR.buildTimelineUpdateContext = function(rangeDesc, manualContext) {
         var parts = [];
         var bookData = NR.state.currentBookData || {};
-        var currentDataText = NR.formatCurrentDataForTimelineContext();
+        var currentDataText = NR.buildAIReferenceContext(rangeDesc, false);
         if (currentDataText) parts.push(currentDataText);
 
         var previousTimelines = NR.getPreviousRecordsByRange(bookData.timelines || [], rangeDesc, 'range');
@@ -4985,7 +5517,7 @@
     };
 
     // 生成剧情时间线
-    NR.generateTimeline = function(text, rangeDesc, context) {
+    NR.generateTimeline = async function(text, rangeDesc, context) {
         if (!text || !text.trim()) {
             alert('选定范围内无内容可供生成时间线。');
             return;
@@ -4994,20 +5526,34 @@
         NR.els['app-loader'].classList.remove('hidden');
         NR.els['app-loader'].querySelector('span').textContent = '正在生成剧情时间线...';
 
-        var timelineContext = NR.buildTimelineUpdateContext(rangeDesc, context);
-        var prompt = NR.buildTimelinePrompt(text, rangeDesc, timelineContext);
-        return NR.callAIForForm(prompt).then(function(data) {
-            var modules = NR.normalizeTimelineModules(data, rangeDesc);
-            var savedCount = NR.saveTimelineModules(modules, rangeDesc);
+        var bookData = NR.state.currentBookData;
+        var fileName = NR.state.currentFileName;
+        var bounds = NR.getFormChapterBounds(rangeDesc);
+        var jobs = [{ text: text, range: rangeDesc }];
+        if (bounds && bounds.start !== bounds.end) {
+            jobs = [];
+            for (var chapter = bounds.start; chapter <= bounds.end; chapter++) jobs.push({ text: NR.getTextForChapter(chapter), range: '第 ' + chapter + ' 章' });
+        }
+        try {
+            var savedCount = 0;
+            for (var job of jobs) {
+                if (!job.text || !job.text.trim()) throw new Error(job.range + '没有可分析的正文');
+                var prompt = NR.buildTimelinePrompt(job.text, job.range, NR.buildTimelineUpdateContext(job.range, context));
+                var data = await NR.callAIForForm(prompt);
+                if (NR.state.currentBookData !== bookData || NR.state.currentFileName !== fileName) throw new Error('书籍已切换，已停止保存');
+                if (!data || (!Array.isArray(data.modules) && !Array.isArray(data.events))) throw new Error('AI未返回有效的时间线数据');
+                savedCount += NR.saveTimelineModules(NR.normalizeTimelineModules(data, job.range), job.range, true);
+                await NR.saveBookData();
+            }
             NR.renderEmbeddedDataBrowserTab('timeline');
             alert('剧情时间线已生成，更新 ' + savedCount + ' 个事件。');
-        }).catch(function(err) {
+        } catch (err) {
             console.error('生成剧情时间线失败:', err);
             alert('生成剧情时间线时出错: ' + err.message);
-        }).finally(function() {
+        } finally {
             NR.els['app-loader'].classList.add('hidden');
             NR.els['app-loader'].querySelector('span').textContent = '正在加载...';
-        });
+        }
     };
 
     // 调用AI接口
@@ -5220,6 +5766,9 @@
 
     // 保存主角数据（合并模式，不自动保存历史，由saveAllDataSnapshot统一处理）
     NR.saveProtagonistData = function(formData, rangeDesc, skipHistory) {
+        if (NR.isScopedFormRange(rangeDesc)) {
+            return NR.saveChapterFormData({ protagonist: formData }, rangeDesc, { partial: true });
+        }
         var finalData = formData;
         var existingInfo = NR.state.currentBookData.protagonistInfo;
         
@@ -5250,6 +5799,7 @@
 
     // 保存NPC数据（保留历史版本）
     NR.saveNPCData = function(formData, rangeDesc) {
+        if (NR.isScopedFormRange(rangeDesc)) return NR.saveChapterFormItem('npcs', formData, rangeDesc);
         if (!NR.state.currentBookData.importantNPCs) {
             NR.state.currentBookData.importantNPCs = [];
         }
@@ -5296,7 +5846,18 @@
             lastUpdated: rangeDesc,
             timestamp: Date.now()
         };
-        NR.state.currentBookData.npcHistory.push(snapshot);
+        NR.upsertFormHistory('npcHistory', snapshot);
+    };
+
+    NR.mergeCharacterProfileFromForm = function(profile, formData, rangeDesc) {
+        var incoming = NR.convertFormToProfile(formData);
+        var oldBounds = NR.getFormChapterBounds(profile.lastUpdated);
+        var newBounds = NR.getFormChapterBounds(rangeDesc);
+        var earlierChapter = oldBounds && newBounds && oldBounds.end > newBounds.end;
+        return {
+            data: earlierChapter ? NR.mergeKnownFormData(incoming, profile.data) : NR.mergeKnownFormData(profile.data, incoming),
+            lastUpdated: earlierChapter ? profile.lastUpdated : rangeDesc
+        };
     };
 
     // 将主角信息同步到人物卡片系统
@@ -5313,14 +5874,15 @@
         if (existingIndex > -1) {
             // 更新已有人物，保留原有的aliases等
             var oldProfile = NR.state.currentBookData.characterProfiles[existingIndex];
+            var updated = NR.mergeCharacterProfileFromForm(oldProfile, formData, rangeDesc);
             NR.state.currentBookData.characterProfiles[existingIndex] = {
                 name: oldProfile.name,
-                data: profileData,
+                data: updated.data,
                 aliases: oldProfile.aliases || [],
                 isProtagonist: true,
                 isImportant: true,
                 cover: oldProfile.cover,
-                lastUpdated: rangeDesc
+                lastUpdated: updated.lastUpdated
             };
         } else {
             // 新增人物，设为主角
@@ -5350,14 +5912,15 @@
         if (existingIndex > -1) {
             // 更新已有人物
             var oldProfile = NR.state.currentBookData.characterProfiles[existingIndex];
+            var updated = NR.mergeCharacterProfileFromForm(oldProfile, formData, rangeDesc);
             NR.state.currentBookData.characterProfiles[existingIndex] = {
                 name: oldProfile.name,
-                data: profileData,
+                data: updated.data,
                 aliases: oldProfile.aliases || [],
                 isProtagonist: oldProfile.isProtagonist || false,
                 isImportant: true,
                 cover: oldProfile.cover,
-                lastUpdated: rangeDesc
+                lastUpdated: updated.lastUpdated
             };
         } else {
             // 新增人物
@@ -6149,11 +6712,30 @@
         }
     };
 
+    NR.saveGlobalDataVersion = function(formData, viewed) {
+        var bookData = NR.state.currentBookData;
+        var history = bookData.globalDataHistory || [];
+        var index = history.indexOf(viewed);
+        var entry = Object.assign({}, viewed || NR.getFormSaveScope(NR.getSelectedAIRange()) || { lastUpdated: '手动编辑' }, {
+            data: JSON.parse(JSON.stringify(formData)), timestamp: Date.now()
+        });
+        if (index >= 0) history[index] = entry;
+        else { history.push(entry); index = history.length - 1; }
+        bookData.globalDataHistory = history;
+        var current = bookData.globalData;
+        if (!current || !viewed || (NR.getFormHistoryKey(current) === NR.getFormHistoryKey(viewed) && current.timestamp === viewed.timestamp)) {
+            bookData.globalData = JSON.parse(JSON.stringify(entry));
+        }
+        NR.state.viewingglobalDataVersion = index;
+        return NR.saveBookData();
+    };
+
     // 显示全局数据编辑弹窗
     NR.showGlobalDataEditModal = function() {
         NR.initCharacterFormData();
-        var info = NR.state.currentBookData.globalData;
-        var data = info ? info.data : { currentLocation: '', currentTime: '', lastSceneTime: '', elapsedTime: '' };
+        var bookData = NR.state.currentBookData;
+        var info = NR.getViewingVersionData('globalData');
+        var data = info && info.data ? info.data : { currentLocation: '', currentTime: '', lastSceneTime: '', elapsedTime: '' };
 
         var existingModal = document.getElementById('global-data-edit-modal');
         if (existingModal) existingModal.remove();
@@ -6187,9 +6769,10 @@
             NR.renderEmbeddedDataBrowserTab('global');
         });
 
-        document.getElementById('btn-save-edit-global').addEventListener('click', function() {
+        document.getElementById('btn-save-edit-global').addEventListener('click', async function() {
+            if (NR.state.currentBookData !== bookData) return;
             var formData = NR.collectFormData(modal, NR.GLOBAL_DATA_FIELDS, 'edit-global');
-            NR.saveGlobalData(formData, '手动编辑');
+            await NR.saveGlobalDataVersion(formData, info);
             alert('全局数据已更新！');
             modal.remove();
             // 刷新内嵌数据浏览器的全局数据标签页
@@ -7047,7 +7630,6 @@
                         '<div class="timeline-module-header">' +
                             '<div>' +
                                 '<h5>' + NR.escapeHtml(item.timeNode || item.range || '未知时间节点') + '</h5>' +
-                                '<span>' + NR.escapeHtml(item.range || '未知范围') + ' · ' + events.length + ' 个事件</span>' +
                             '</div>' +
                             '<span class="history-item-time">' + NR.formatTimestamp(item.timestamp) + '</span>' +
                         '</div>' +
@@ -7151,7 +7733,7 @@
                     this.classList.add('selected');
                     
                     // 使用保存的上下文执行行动
-                    var context = NR.state.currentActionContext || NR.buildAIFormContextForSequel();
+                    var context = NR.buildSelectedAIFormContext();
                     NR.els['character-form-choice-modal'].style.display = 'none';
                     NR.executeActionOption(action, context);
                 }
@@ -8638,6 +9220,10 @@
     
     // 构建聊天系统提示词
     NR.buildPhoneChatPrompt = function(profile, contextTexts) {
+        // 填表会更新人物卡，聊天对象可能仍持有更新前的对象。
+        profile = (NR.state.currentBookData.characterProfiles || []).find(function(current) {
+            return current.name === profile.name || (current.aliases || []).indexOf(profile.name) !== -1;
+        }) || profile;
         var characterInfo = NR.getCharacterTagsInfo(profile);
         var userInfo = NR.getUserRoleInfo();
         var contextInfo = '';

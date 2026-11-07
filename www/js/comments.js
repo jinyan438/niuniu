@@ -155,80 +155,9 @@
         });
     }
 
-    function getEntryRangeText(entry) {
-        return (entry && (entry.lastUpdated || entry.range || entry.sourceRange)) || '';
-    }
-
-    function pickEntryForPreviousChapter(entries, previousChapter) {
-        entries = (entries || []).filter(Boolean);
-        if (!entries.length) return null;
-
-        var ranged = [];
-        var unranged = [];
-        entries.forEach(function(entry) {
-            var bounds = parseChapterBounds(getEntryRangeText(entry));
-            if (bounds) {
-                ranged.push({ entry: entry, bounds: bounds });
-            } else {
-                unranged.push(entry);
-            }
-        });
-
-        var exact = ranged.filter(function(item) {
-            return item.bounds.start <= previousChapter && item.bounds.end >= previousChapter;
-        });
-        if (exact.length > 0) {
-            exact.sort(function(a, b) { return (b.entry.timestamp || 0) - (a.entry.timestamp || 0); });
-            return exact[0].entry;
-        }
-
-        var before = ranged.filter(function(item) {
-            return item.bounds.end <= previousChapter;
-        });
-        if (before.length > 0) {
-            before.sort(function(a, b) {
-                if (a.bounds.end !== b.bounds.end) return b.bounds.end - a.bounds.end;
-                return (b.entry.timestamp || 0) - (a.entry.timestamp || 0);
-            });
-            return before[0].entry;
-        }
-
-        if (unranged.length > 0) {
-            unranged.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
-            return unranged[0];
-        }
-        return null;
-    }
-
     function unwrapData(record) {
         if (!record) return null;
         return record.data && typeof record.data === 'object' ? record.data : record;
-    }
-
-    function pickSingleData(key, historyKey, previousChapter) {
-        var bookData = NR.state.currentBookData || {};
-        var historyEntry = pickEntryForPreviousChapter(bookData[historyKey] || [], previousChapter);
-        if (historyEntry) return historyEntry;
-
-        var current = bookData[key];
-        if (!current) return null;
-        var bounds = parseChapterBounds(getEntryRangeText(current));
-        if (!bounds || bounds.end <= previousChapter) return current;
-        return null;
-    }
-
-    function pickListData(key, historyKey, previousChapter) {
-        var bookData = NR.state.currentBookData || {};
-        var historyEntry = pickEntryForPreviousChapter(bookData[historyKey] || [], previousChapter);
-        if (historyEntry && Array.isArray(historyEntry.data)) {
-            return historyEntry.data;
-        }
-
-        var currentList = bookData[key] || [];
-        return currentList.filter(function(record) {
-            var bounds = parseChapterBounds(getEntryRangeText(record));
-            return !bounds || bounds.end <= previousChapter;
-        });
     }
 
     function stringifyFieldValue(value) {
@@ -307,51 +236,41 @@
         return JSON.stringify(timeline, null, 2);
     }
 
-    function pickTimelineData(previousChapter) {
+    function getPreviousTimelines(currentChapter) {
         var timelines = NR.state.currentBookData.timelines || [];
-        var exact = [];
-        var before = [];
-        var unranged = [];
-
-        timelines.forEach(function(item) {
+        return timelines.map(function(item) {
             var bounds = parseChapterBounds(item.range || item.lastUpdated || '');
-            if (!bounds) {
-                unranged.push(item);
-            } else if (bounds.start <= previousChapter && bounds.end >= previousChapter) {
-                exact.push(item);
-            } else if (bounds.end <= previousChapter) {
-                before.push({ item: item, bounds: bounds });
-            }
-        });
-
-        if (exact.length > 0) return exact.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0); });
-        if (before.length > 0) {
-            before.sort(function(a, b) {
-                if (a.bounds.end !== b.bounds.end) return b.bounds.end - a.bounds.end;
-                return (b.item.timestamp || 0) - (a.item.timestamp || 0);
+            return bounds ? { item: item, bounds: bounds } : null;
+        }).filter(function(record) {
+            if (!record || record.bounds.end >= currentChapter) return false;
+            return (record.item.events || []).every(function(event) {
+                var bounds = parseChapterBounds(event.sourceRange || '');
+                return !bounds || bounds.end < currentChapter;
             });
-            return [before[0].item];
-        }
-        return unranged.slice(0, 1);
+        }).sort(function(a, b) {
+            return a.bounds.end - b.bounds.end || (a.item.timestamp || 0) - (b.item.timestamp || 0);
+        }).map(function(record) {
+            return record.item;
+        });
     }
 
-    function buildPreviousChapterAiData(chapterNumber) {
-        var previousChapter = chapterNumber - 1;
-        if (previousChapter < 1) return '当前选区位于第1章，无上一章AI数据库数据。';
+    function buildPreviousChaptersAiData(chapterNumber) {
+        if (chapterNumber <= 1) return '当前选区位于第1章，暂无前文章节AI数据库资料。';
 
         NR.initCharacterFormData && NR.initCharacterFormData();
 
-        var globalData = pickSingleData('globalData', 'globalDataHistory', previousChapter);
-        var protagonist = pickSingleData('protagonistInfo', 'protagonistHistory', previousChapter);
-        var npcs = pickListData('importantNPCs', 'npcHistory', previousChapter);
-        var skills = pickListData('skills', 'skillsHistory', previousChapter);
-        var items = pickListData('items', 'itemsHistory', previousChapter);
-        var quests = pickListData('quests', 'questsHistory', previousChapter);
-        var locations = pickListData('locations', 'locationsHistory', previousChapter);
-        var equipments = pickListData('equipments', 'equipmentsHistory', previousChapter);
-        var factions = pickListData('factions', 'factionsHistory', previousChapter);
-        var intels = pickListData('intels', 'intelsHistory', previousChapter);
-        var timelines = pickTimelineData(previousChapter);
+        var reference = NR.getChapterFormReferenceData('第 ' + chapterNumber + ' 章');
+        var globalData = reference.globalData;
+        var protagonist = reference.protagonistInfo;
+        var npcs = reference.importantNPCs || [];
+        var skills = reference.skills || [];
+        var items = reference.items || [];
+        var quests = reference.quests || [];
+        var locations = reference.locations || [];
+        var equipments = reference.equipments || [];
+        var factions = reference.factions || [];
+        var intels = reference.intels || [];
+        var timelines = getPreviousTimelines(chapterNumber);
 
         var parts = [];
         var globalText = formatRecord('全局数据', NR.GLOBAL_DATA_FIELDS, globalData);
@@ -374,7 +293,7 @@
             parts.push('【剧情时间线】\n' + timelines.map(formatTimelineForPrompt).join('\n\n---\n\n'));
         }
 
-        return parts.length ? parts.join('\n\n') : ('未找到第 ' + previousChapter + ' 章可用的AI数据库数据。');
+        return parts.length ? parts.join('\n\n') : '暂无选中片段之前章节可用的AI数据库资料。';
     }
 
     function parseReaderPersonas(value) {
@@ -428,7 +347,8 @@
             '【选中小说片段】\n' + selectionInfo.text,
             '【选中片段前面所有章节总结（不含本章，按章节顺序）】\n' + summaryText,
             '【本章开头到选中片段为止的文本】\n' + selectionInfo.chapterTextBeforeSelection,
-            '【选中片段前一章AI数据库数据】\n' + buildPreviousChapterAiData(selectionInfo.chapterNumber),
+            '【此前章节AI数据库资料（不含本章）】\n' + buildPreviousChaptersAiData(selectionInfo.chapterNumber),
+            '【阅读范围约束】\n只能使用选中片段、本章开头至该片段的文本以及此前章节资料。前文数据库记录的是历史已知信息，当前场景和状态以本章已读文本为准；不得将本章未读部分或后续章节内容当作已知事实。',
             '【最终输出要求】\n请为上面每个读者人格各生成1条评论，像番茄小说段评区一样自然。只输出JSON数组，不要Markdown代码块，不要解释。'
         ].join('\n\n---\n\n');
     }
@@ -571,7 +491,7 @@
         if (quote) quote.textContent = '“' + selectionInfo.text + '”';
         if (personaCount) personaCount.textContent = personas.length + ' 位读者人格';
         if (contextNote) {
-            contextNote.textContent = '上下文：前文总结 + 本章已读文本 + 上一章AI数据库';
+            contextNote.textContent = '上下文：前文总结 + 本章已读文本 + 前文章节AI数据库';
         }
         renderComments(thread);
     }

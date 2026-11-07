@@ -1215,10 +1215,12 @@
                 var start = parseInt(parts[0], 10);
                 var end = parts.length === 2 ? parseInt(parts[1], 10) : start;
                 if (isNaN(start) || isNaN(end) || start < 1 || end > NR.state.chapters.length || start > end) return alert('无效的章节序号。');
-                var texts = [];
-                for (var i = start; i <= end; i++) { texts.push(NR.getTextForChapter(i)); }
-                text = texts.join('\n\n');
-                rangeDesc = '第 ' + start + (start === end ? '' : '-' + end) + ' 章';
+                if (start !== end) {
+                    NR.generateChapterCharacterForms(start, end);
+                    return;
+                }
+                text = NR.getTextForChapter(start);
+                rangeDesc = '第 ' + start + ' 章';
             }
             NR.generateAllCharacterForms(text, rangeDesc);
         });
