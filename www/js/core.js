@@ -87,11 +87,10 @@
 
     NR.prepareContent = function(text) {
         NR.state.chapters = [];
-        var chapterRegex = /^(第\s*[一二三四五六七八九十百千\d\s]+[章回节卷])|^(Chapter\s+\d+)|(^\d{1,3}\s+)/;
         // 匹配中文引号 "" 、英文引号 "" 和日式引号 「」
         var dialogueRegex = /(\u201c[^\u201d]*\u201d|"[^"]*"|「[^」]*」)/g;
         var IMG_MARK = ':::EPUB_IMG:::';
-        NR.state.originalParagraphs = (text || '').split(/\r?\n/).map(function(pText, index) {
+        NR.state.originalParagraphs = NR.getReaderContentLines(text).map(function(pText, index) {
             var p = document.createElement('p');
             p.dataset.originalIndex = index;
             var trimmedText = pText.trim();
@@ -103,9 +102,8 @@
                 p.innerHTML = '<img class="epub-image" src="' + decodeURIComponent(urlEnc || '') + '" alt="' + NR.escapeHtml(decodeURIComponent(altEnc || '')) + '">';
             } else if (trimmedText === '') {
                 p.classList.add('blank-line');
-                p.innerHTML = '&nbsp;';
             } else {
-                if (chapterRegex.test(trimmedText) && trimmedText.length < 50) {
+                if (NR.isChapterTitle(trimmedText)) {
                     var chapId = 'chap-' + index;
                     NR.state.chapters.push({
                         title: trimmedText,
@@ -147,16 +145,17 @@
             };
             for (var i = 0; i < NR.state.originalParagraphs.length; i++) {
                 var p = NR.state.originalParagraphs[i];
+                // 空行只保留在原始段落中以稳定索引，阅读间距统一由段距设置控制。
+                if (p.classList.contains('blank-line')) continue;
                 if (p.id && p.id.startsWith('chap-') && currentPageParas.length > 0) {
                     createPage(currentPageParas);
                     currentPageParas = [];
                 }
-                if (currentPageParas.length === 0 && p.classList.contains('blank-line')) continue;
                 ruler.innerHTML = '';
                 currentPageParas.concat([p]).forEach(function(testP) { ruler.appendChild(testP.cloneNode(true)); });
                 if (ruler.scrollHeight > ruler.clientHeight) {
                     createPage(currentPageParas);
-                    currentPageParas = p.classList.contains('blank-line') ? [] : [p];
+                    currentPageParas = [p];
                 } else {
                     currentPageParas.push(p);
                 }

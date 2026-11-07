@@ -21,14 +21,29 @@
         return '未知';
     };
 
-    NR.countChapters = function(textContent) {
-        if (!textContent) return 0;
+    NR.isChapterTitle = function(text) {
         var chapterRegex = /^(第\s*[一二三四五六七八九十百千\d\s]+[章回节卷])|^(Chapter\s+\d+)|(^\d{1,3}\s+)/;
-        var lines = textContent.split(/\r?\n/);
+        return text.length > 0 && text.length < 50 && chapterRegex.test(text);
+    };
+
+    NR.getReaderContentLines = function(textContent) {
+        var previousNonEmptyLine = '';
+        return (textContent || '').split(/\r?\n/).map(function(line) {
+            var trimmedLine = line.trim();
+            if (!trimmedLine) return line;
+            // 部分下载文本在正文前重复章节标题。只合并中间没有正文的重复项，
+            // 并保留空段落，避免改变阅读进度、书签和段评使用的原始段落索引。
+            if (trimmedLine === previousNonEmptyLine && NR.isChapterTitle(trimmedLine)) return '';
+            previousNonEmptyLine = trimmedLine;
+            return line;
+        });
+    };
+
+    NR.countChapters = function(textContent) {
+        var lines = NR.getReaderContentLines(textContent);
         var count = 0;
         for (var i = 0; i < lines.length; i++) {
-            var trimmedLine = lines[i].trim();
-            if (trimmedLine.length > 0 && trimmedLine.length < 50 && chapterRegex.test(trimmedLine)) {
+            if (NR.isChapterTitle(lines[i].trim())) {
                 count++;
             }
         }
