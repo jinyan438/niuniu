@@ -1605,13 +1605,55 @@
         }).map(function(chapter, index) { chapter.index = index; return chapter; });
     };
 
+    function decodeHtmlEntities(value) {
+        var named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+        return value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, function(entity, name) {
+            if (name.charAt(0) !== '#') return named[name.toLowerCase()];
+            var hex = name.charAt(1).toLowerCase() === 'x';
+            var code = parseInt(name.slice(hex ? 2 : 1), hex ? 16 : 10);
+            return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+        });
+    }
+
+    function stripLegadoArtifacts(value, preserveLineBreaks) {
+        // Legado puts JSON actions inside an img src without HTML-escaping
+        // its quotes. Remove these controls before DOMParser can split them
+        // into broken attributes, and also handle escaped controls in old TXT
+        // caches. Only recognized source controls are removed from plain TXT.
+        function removeControl(tag) {
+            var decoded = tag;
+            for (var pass = 0; pass < 4; pass++) {
+                var next = decodeHtmlEntities(decoded);
+                if (next === decoded) break;
+                decoded = next;
+            }
+            var isControl = /^<\/?(?:comment|note)\b/i.test(decoded) ||
+                /\bshow(?:Cmt|FanqieComment)\s*\(/i.test(decoded) ||
+                /,\s*\{[\s\S]*?["'](?:js|click|type|style)["']\s*:/i.test(decoded);
+            return isControl ? (preserveLineBreaks ? (tag.match(/\r?\n/g) || []).join('') : '') : tag;
+        }
+        return asString(value)
+            .replace(/&(?:amp;)*(?:lt|#0*60|#x0*3c);\/?(?:img|comment|note)\b[\s\S]*?&(?:amp;)*(?:gt|#0*62|#x0*3e);/gi, removeControl)
+            .replace(/<\/?(?:img|comment|note)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, removeControl);
+    }
+
     function htmlToText(value) {
-        var text = asString(value);
-        if (!/[<>]/.test(text) || !root.DOMParser) return text;
-        var doc = new root.DOMParser().parseFromString(text, 'text/html');
-        Array.from(doc.querySelectorAll('br')).forEach(function(node) { node.replaceWith('\n'); });
-        Array.from(doc.querySelectorAll('p,div,li,h1,h2,h3,h4,h5,h6')).forEach(function(node) { node.append('\n'); });
-        return (doc.body.textContent || '').replace(/\u00a0/g, ' ');
+        var text = stripLegadoArtifacts(value);
+        if (!/<\/?[a-z][\s\S]*?>/i.test(text)) return text;
+        if (root.DOMParser) {
+            var doc = new root.DOMParser().parseFromString(text, 'text/html');
+            Array.from(doc.querySelectorAll('script,style,img,comment,note')).forEach(function(node) { node.remove(); });
+            Array.from(doc.querySelectorAll('br')).forEach(function(node) { node.replaceWith('\n'); });
+            Array.from(doc.querySelectorAll('p,div,li,h1,h2,h3,h4,h5,h6')).forEach(function(node) { node.append('\n'); });
+            text = doc.body.textContent || '';
+        } else {
+            text = decodeHtmlEntities(text
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+                .replace(/<br\b[^>]*>|<\/(?:p|div|li|h[1-6])\s*>/gi, '\n')
+                .replace(/<\/?[a-z][\w:-]*\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, ''));
+        }
+        return stripLegadoArtifacts(text).replace(/\u00a0/g, ' ');
     }
 
     function applyReplaceRule(content, rule) {
@@ -1702,6 +1744,7 @@
     BookSourceEngine.jsonPath = jsonPath;
     BookSourceEngine.resolveUrl = resolveUrl;
     BookSourceEngine.splitUrlOption = splitUrlOption;
+    BookSourceEngine.stripLegadoArtifacts = stripLegadoArtifacts;
 
     return {
         BookSourceEngine: BookSourceEngine,

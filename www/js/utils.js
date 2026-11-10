@@ -28,6 +28,9 @@
 
     NR.getReaderContentLines = function(textContent) {
         var previousNonEmptyLine = '';
+        // Repair previously cached source controls without moving paragraph
+        // indexes used by chapter navigation, bookmarks and reader comments.
+        if (NR.BookSourceEngine) textContent = NR.BookSourceEngine.stripLegadoArtifacts(textContent, true);
         return (textContent || '').split(/\r?\n/).map(function(line) {
             var trimmedLine = line.trim();
             if (!trimmedLine) return line;

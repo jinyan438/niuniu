@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { paragraphControl, chapterControl, escapeMarkup } = require('./fixtures/legadoContent.js');
 
 function loadReader() {
     function element() {
@@ -43,7 +44,7 @@ function loadReader() {
         document: { createElement: element, addEventListener() {}, body: {} },
         getComputedStyle: () => ({ fontFamily: 'sans-serif' })
     });
-    for (const file of ['utils.js', 'core.js']) {
+    for (const file of ['bookSourceEngine.js', 'utils.js', 'core.js']) {
         vm.runInContext(fs.readFileSync(path.join(__dirname, '../www/js', file), 'utf8'), context);
     }
     return NR;
@@ -101,4 +102,23 @@ test('whitespace-only text does not create blank reading pages', async () => {
     await NR.paginate();
 
     assert.equal(NR.state.totalPages, 0);
+});
+
+test('repairs existing Legado caches while keeping paragraph indexes and EPUB illustrations', async () => {
+    const NR = loadReader();
+    const splitControl = paragraphControl.replace(' src=', '\r\n src=');
+    const imageMarker = ':::EPUB_IMG:::data%3Aimage%2Fpng%3Bbase64%2CAA%3D%3D|插图';
+    const text = ['第478章 对妖', '他说：“因为啊。”' + splitControl,
+        '刹时间，妖歌神色阴沉无比。', escapeMarkup(chapterControl), imageMarker,
+        '第479章 后续', '结尾'].join('\r\n');
+    NR.prepareContent(text);
+    await NR.paginate();
+
+    assert.equal(NR.state.originalParagraphs.length, text.split('\r\n').length);
+    assert.deepEqual(Array.from(NR.state.chapters, (chapter) => chapter.p_index), [0, 6]);
+    assert.match(NR.state.originalParagraphs[1].innerHTML, /他说：/);
+    assert.equal(NR.state.originalParagraphs[2].innerHTML, '');
+    assert.equal(NR.state.originalParagraphs[3].innerHTML, '刹时间，妖歌神色阴沉无比。');
+    assert.ok(NR.state.originalParagraphs[5].classList.contains('epub-image-paragraph'));
+    assert.doesNotMatch(pageContents(NR).flat().join(''), /showCmt|showFanqieComment|&lt;img|svg\+xml|qtbzs/);
 });
