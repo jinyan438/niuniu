@@ -6,7 +6,7 @@
         gptsovits: {
             downloadStallMs: 15000,
             totalRequestMs: 120000,
-            requestStallMs: 90000
+            requestStallMs: 360000
         },
         indextts: {
             downloadStallMs: 60000,
@@ -16,6 +16,76 @@
     };
     var ttsWatchdogTimer = null;
     var ttsSeqStartTime = new Map();
+    var ttsSession = 0;
+    var ttsRequestControllers = new Set();
+    var playbackStartTimer = null;
+    var playbackAttempt = 0;
+    var playbackFailure = null;
+
+    function normalizeApiUrl(value) {
+        var url = String(value || '').trim().replace(/\/+$/, '').replace(/\/(?:tts|voices|docs)$/i, '');
+        if (url && !/^https?:\/\//i.test(url)) url = 'http://' + url;
+        return url;
+    }
+
+    // Request binary data explicitly: Capacitor's patched fetch does not expose
+    // a real streaming body or consistently honor AbortSignal on Android.
+    function requestTts(path, options, timeoutMs, binary, apiUrl) {
+        options = options || {};
+        apiUrl = normalizeApiUrl(apiUrl || NR.ttsController.getCurrentApiUrl());
+        var controller = new AbortController();
+        var timer;
+        ttsRequestControllers.add(controller);
+        var http = NR.isCapacitor && NR.isCapacitor() && window.Capacitor &&
+            window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+        var request = Promise.resolve().then(function() {
+            if (controller.signal.aborted) throw new Error('TTS 请求已取消。');
+            if (http) {
+                return http.request({
+                    url: apiUrl + path,
+                    method: options.method || 'GET',
+                    headers: options.headers || {},
+                    data: options.body ? JSON.parse(options.body) : undefined,
+                    responseType: binary ? 'arraybuffer' : 'text',
+                    connectTimeout: Math.min(timeoutMs, 30000),
+                    readTimeout: timeoutMs
+                }).then(function(result) {
+                    var headers = new Headers(result.headers || {});
+                    var contentType = headers.get('content-type') || '';
+                    var data = result.data;
+                    if (binary && result.status >= 200 && result.status < 300 &&
+                        !/json|text\/|html/i.test(contentType)) {
+                        var raw = atob(data);
+                        data = new Uint8Array(raw.length);
+                        for (var i = 0; i < raw.length; i++) data[i] = raw.charCodeAt(i);
+                    } else if (typeof data !== 'string') {
+                        data = JSON.stringify(data);
+                    }
+                    return new Response(data, { status: result.status, headers: headers });
+                });
+            }
+            return fetch(apiUrl + path,
+                Object.assign({}, options, { cache: 'no-store', signal: controller.signal }));
+        }).then(function(response) {
+            if (!response.ok) {
+                return response.text().then(function(message) {
+                    throw new Error('TTS API HTTP ' + response.status + ': ' + message.slice(0, 300));
+                });
+            }
+            return binary ? readAudioBlobWithTimeout(response, controller,
+                getCurrentTtsTimeouts().downloadStallMs) : response.json();
+        });
+        var cancelled = new Promise(function(resolve, reject) {
+            controller.signal.addEventListener('abort', function() {
+                reject(new Error('TTS 请求已取消或超时，请检查 API 地址和网络。'));
+            }, { once: true });
+            timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+        });
+        return Promise.race([request, cancelled]).finally(function() {
+            clearTimeout(timer);
+            ttsRequestControllers.delete(controller);
+        });
+    }
 
     function getCurrentTtsTimeouts() {
         if (NR.ttsController && NR.ttsController.isIndexTtsProvider && NR.ttsController.isIndexTtsProvider()) {
@@ -112,9 +182,9 @@
         return chunks;
     }
 
-    function createPlayableAudioSource(blob, sequence) {
+    function createPlayableAudioSource(blob, sequence, preferNativeCache) {
         var mimeType = blob.type || 'audio/wav';
-        var useNativeCache = NR.isCapacitor &&
+        var useNativeCache = preferNativeCache && NR.isCapacitor &&
             NR.isCapacitor() &&
             window.Capacitor &&
             window.Capacitor.convertFileSrc &&
@@ -125,7 +195,8 @@
                 playUrl: URL.createObjectURL(blob),
                 blobUrl: null,
                 cachePath: null,
-                cacheDirectory: null
+                cacheDirectory: null,
+                audioBlob: blob
             }).then(function(result) {
                 result.blobUrl = result.playUrl;
                 return result;
@@ -160,7 +231,8 @@
                     playUrl: window.Capacitor.convertFileSrc(uriResult.uri),
                     blobUrl: null,
                     cachePath: relativePath,
-                    cacheDirectory: 'CACHE'
+                    cacheDirectory: 'CACHE',
+                    audioBlob: blob
                 };
             });
         });
@@ -168,6 +240,7 @@
 
     NR.ttsState = {
         isPlaying: false,
+        isStarting: false,
         isPaused: false,
         isActive: false,
         currentSequence: 0,
@@ -254,10 +327,15 @@
         },
 
         getCurrentApiUrl: function() {
-            return this.isIndexTtsProvider() ? this.settings.indexTtsApiUrl : this.settings.gptSovitsApiUrl;
+            return normalizeApiUrl(this.isIndexTtsProvider() ? this.settings.indexTtsApiUrl : this.settings.gptSovitsApiUrl);
         },
 
         setCurrentApiUrl: function(apiUrl) {
+            apiUrl = normalizeApiUrl(apiUrl);
+            if (this.getCurrentApiUrl() !== apiUrl) {
+                this.loadedVoiceId = null;
+                if (NR.ttsState.isActive) NR.stopTts(false);
+            }
             if (this.isIndexTtsProvider()) {
                 this.settings.indexTtsApiUrl = apiUrl || '';
             } else {
@@ -477,6 +555,8 @@
         },
 
         setProvider: function(provider) {
+            if (NR.ttsState.isActive) NR.stopTts(false);
+            this.loadedVoiceId = null;
             this.settings.provider = this.normalizeProvider(provider);
             if (this.isIndexTtsProvider() && this.settings.indexTtsVoices.length === 0) {
                 this.indexTtsVoiceCatalogStatus = 'idle';
@@ -519,14 +599,7 @@
             this.indexTtsVoiceCatalogStatus = 'loading';
             this.renderAllUI();
 
-            return fetch(apiUrl + '/voices', { cache: 'no-store' }).then(function(response) {
-                if (!response.ok) {
-                    return response.text().then(function(errText) {
-                        throw new Error('IndexTTS voice list error: ' + response.status + ' ' + errText);
-                    });
-                }
-                return response.json();
-            }).then(function(data) {
+            return requestTts('/voices', {}, 30000, false, apiUrl).then(function(data) {
                 var voices = Array.isArray(data) ? data : (data && Array.isArray(data.voices) ? data.voices : []);
                 var normalizedVoices = voices.map(function(voice, index) {
                     var id = String((voice && (voice.id || voice.name || voice.preset_name)) || ('preset-' + index));
@@ -681,21 +754,9 @@
                 return Promise.resolve(voice);
             }
 
-            var gptUrl = apiUrl + '/set_gpt_weights?weights_path=' + encodeURIComponent(voice.gptPath);
-            return fetch(gptUrl).then(function(gptRes) {
-                if (!gptRes.ok) {
-                    return gptRes.json().then(function(err) {
-                        throw new Error('GPT模型加载失败: ' + ((err && err.Exception) || JSON.stringify(err)));
-                    });
-                }
-                var sovitsUrl = apiUrl + '/set_sovits_weights?weights_path=' + encodeURIComponent(voice.sovitsPath);
-                return fetch(sovitsUrl);
-            }).then(function(sovitsRes) {
-                if (!sovitsRes.ok) {
-                    return sovitsRes.json().then(function(err) {
-                        throw new Error('SoVITS模型加载失败: ' + ((err && err.Exception) || JSON.stringify(err)));
-                    });
-                }
+            return requestTts('/set_gpt_weights?weights_path=' + encodeURIComponent(voice.gptPath), {}, 120000, false, apiUrl).then(function() {
+                return requestTts('/set_sovits_weights?weights_path=' + encodeURIComponent(voice.sovitsPath), {}, 120000, false, apiUrl);
+            }).then(function() {
                 self.loadedVoiceId = voiceId;
                 if (loadOptions.persistSelection) {
                     self.saveSettings();
@@ -803,7 +864,7 @@
     function startTtsWatchdog() {
         if (ttsWatchdogTimer) return;
         ttsWatchdogTimer = setInterval(function() {
-            if (!NR.ttsState.isActive || NR.ttsState.isPlaying || NR.ttsState.isPaused) {
+            if (!NR.ttsState.isActive || NR.ttsState.isPlaying || NR.ttsState.isStarting || NR.ttsState.isPaused) {
                 return;
             }
             var seq = NR.ttsState.currentSequence;
@@ -815,11 +876,7 @@
             var timeoutConfig = getCurrentTtsTimeouts();
 
             if (!NR.ttsState.audioQueue.has(seq) && waitMs > timeoutConfig.requestStallMs) {
-                console.warn('Watchdog: Sequence ' + seq + ' stalled for ' + waitMs + 'ms, skipping.');
-                NR.ttsState.audioQueue.set(seq, { failed: true });
-                if (NR.ttsState.isActive) {
-                    tryPlayNext();
-                }
+                failTts(new Error('语音请求超时，请检查服务端是否正常运行。'));
             }
         }, 1000);
     }
@@ -833,6 +890,13 @@
     }
 
     function resetTtsState() {
+        ttsSession++;
+        playbackAttempt++;
+        playbackFailure = null;
+        clearTimeout(playbackStartTimer);
+        playbackStartTimer = null;
+        ttsRequestControllers.forEach(function(controller) { controller.abort(); });
+        ttsRequestControllers.clear();
         if (NR.ttsState.pumpTimer) {
             clearTimeout(NR.ttsState.pumpTimer);
         }
@@ -855,6 +919,7 @@
 
         Object.assign(NR.ttsState, {
             isPlaying: false,
+            isStarting: false,
             isPaused: false,
             isActive: false,
             currentSequence: 0,
@@ -878,6 +943,11 @@
         NR.els['tts-status'].textContent = '已停止';
         NR.els['btn-tts-play-pause'].innerHTML = '▶️';
     };
+
+    function failTts(error) {
+        NR.stopTts(false);
+        NR.els['tts-status'].textContent = '听书失败：' + error.message;
+    }
 
     NR.toggleListenMode = function() {
         NR.state.isListenMode = !NR.state.isListenMode;
@@ -947,6 +1017,7 @@
 
     function fetchCurrentSequenceFirst() {
         if (!NR.ttsState.isActive) return;
+        var session = ttsSession;
 
         var sequence = NR.ttsState.currentSequence;
         var chunk = NR.ttsState.textChunks[sequence];
@@ -961,8 +1032,10 @@
         NR.ttsState.inFlightRequests++;
         setTtsStatus('首段缓冲中...', sequence);
 
-        fetchAudioWithRetry(chunk, sequence)
+        startTtsWatchdog();
+        fetchAudioWithRetry(chunk, sequence, session)
             .then(function(result) {
+                if (session !== ttsSession) { cleanupAudioResource(result); return; }
                 if (result && NR.ttsState.isActive) {
                     NR.ttsState.audioQueue.set(sequence, Object.assign({}, result, {
                         paragraph: chunk.paragraph
@@ -972,14 +1045,12 @@
                 }
             })
             .catch(function(err) {
+                if (session !== ttsSession) return;
                 console.error('Initial TTS fetch error for sequence ' + sequence + ':', err);
-                if (NR.ttsState.isActive) {
-                    NR.ttsState.audioQueue.set(sequence, { failed: true });
-                    tryPlayNext();
-                    startTtsPump();
-                }
+                if (NR.ttsState.isActive) failTts(err);
             })
             .finally(function() {
+                if (session !== ttsSession) return;
                 NR.ttsState.inFlightRequests = Math.max(0, NR.ttsState.inFlightRequests - 1);
                 schedulePump(0);
             });
@@ -1017,9 +1088,13 @@
             ttsSeqStartTime.set(sequence, Date.now());
             NR.ttsState.inFlightRequests++;
 
-            (function(seq, chk) {
-                fetchAudioWithRetry(chk, seq)
+            (function(seq, chk, session) {
+                fetchAudioWithRetry(chk, seq, session)
                     .then(function(result) {
+                        if (session !== ttsSession || seq < NR.ttsState.currentSequence) {
+                            cleanupAudioResource(result);
+                            return;
+                        }
                         if (result && NR.ttsState.isActive) {
                             NR.ttsState.audioQueue.set(seq, Object.assign({}, result, {
                                 paragraph: chk.paragraph
@@ -1030,29 +1105,33 @@
                         }
                     })
                     .catch(function(err) {
+                        if (session !== ttsSession) return;
                         console.error('TTS fetch error for sequence ' + seq + ':', err);
                         if (NR.ttsState.isActive) {
-                            NR.ttsState.audioQueue.set(seq, { failed: true });
+                            NR.ttsState.audioQueue.set(seq, { failed: true, error: err });
                             if (seq === NR.ttsState.currentSequence && !NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
                                 tryPlayNext();
                             }
                         }
                     })
                     .finally(function() {
+                        if (session !== ttsSession) return;
                         NR.ttsState.inFlightRequests = Math.max(0, NR.ttsState.inFlightRequests - 1);
                         schedulePump(0);
                     });
-            })(sequence, chunk);
+            })(sequence, chunk, ttsSession);
         }
         schedulePump(200);
     }
 
-    function fetchAudioWithRetry(chunk, sequence, maxRetries) {
-        if (maxRetries === undefined) maxRetries = 2;
+    function fetchAudioWithRetry(chunk, sequence, session, maxRetries) {
+        if (maxRetries === undefined) maxRetries = 1;
         var attempt = 0;
         
         function tryFetch() {
-            return fetchAudioBlob(chunk, sequence).then(function(blob) {
+            if (session !== ttsSession) return Promise.resolve(null);
+            return fetchAudioBlob(chunk, sequence, session).then(function(blob) {
+                if (session !== ttsSession) return null;
                 if (blob) {
                     return createPlayableAudioSource(blob, sequence).then(function(source) {
                         source.sequence = sequence;
@@ -1063,6 +1142,7 @@
             }).catch(function(error) {
                 console.error('Fetch attempt ' + (attempt + 1) + ' for seq ' + sequence + ' failed:', error);
                 attempt++;
+                if (session !== ttsSession) return null;
                 if (attempt > maxRetries) throw error;
                 return new Promise(function(res) { setTimeout(res, 1000 * attempt); }).then(tryFetch);
             });
@@ -1110,7 +1190,7 @@
                 isSettled = true;
                 cleanup();
                 try {
-                    reader.cancel(error);
+                    reader.cancel(error).catch(function() {});
                 } catch (_) {}
                 reject(error);
             }
@@ -1151,7 +1231,8 @@
     }
 
     function tryPlayNext() {
-        if (!NR.ttsState.isActive || NR.ttsState.isPlaying || NR.ttsState.isPaused) return;
+        if (!NR.ttsState.isActive || NR.ttsState.isPlaying || NR.ttsState.isStarting || NR.ttsState.isPaused) return;
+        if (NR.ttsState.currentPlayItem) return;
 
         var nextItem = NR.ttsState.audioQueue.get(NR.ttsState.currentSequence);
 
@@ -1159,8 +1240,7 @@
             NR.ttsState.audioQueue.delete(NR.ttsState.currentSequence);
 
             if (nextItem.failed) {
-                console.warn('Skipping failed sequence ' + NR.ttsState.currentSequence + '.');
-                NR.onAudioEnded();
+                failTts(nextItem.error || new Error('语音合成失败，请检查 API。'));
                 return;
             }
 
@@ -1168,23 +1248,10 @@
 
             NR.ttsState.currentPlayItem = nextItem;
             if (!nextItem.playUrl) {
-                console.error('TTS item is missing playUrl for sequence ' + NR.ttsState.currentSequence + ':', nextItem);
-                NR.onAudioEnded();
+                failTts(new Error('没有可播放的音频。'));
                 return;
             }
-            setTtsStatus('准备播放...', nextItem.sequence);
-            NR.state.ttsAudioElement.src = nextItem.playUrl;
-            NR.state.ttsAudioElement.load();
-
-            NR.state.ttsAudioElement.play().then(function() {
-                NR.ttsState.isPlaying = true;
-                NR.els['tts-status'].textContent = '播放中...';
-                NR.els['btn-tts-play-pause'].innerHTML = '⏸️';
-                highlightAndScrollToPara(nextItem.paragraph);
-            }).catch(function(error) {
-                console.error('Playback failed to start for seq ' + NR.ttsState.currentSequence + ':', error);
-                NR.onAudioEnded();
-            });
+            playCurrentItem(true);
         } else if (NR.ttsState.nextSequenceToFetch >= NR.ttsState.textChunks.length && NR.ttsState.inFlightRequests === 0) {
             NR.els['tts-status'].textContent = "朗读完毕";
             NR.els['btn-tts-play-pause'].innerHTML = '▶️';
@@ -1195,6 +1262,81 @@
             NR.els['btn-tts-play-pause'].innerHTML = '⏳';
         }
     }
+
+    function playCurrentItem(loadSource) {
+        var item = NR.ttsState.currentPlayItem;
+        if (!item) return;
+        var session = ttsSession;
+        var attempt = ++playbackAttempt;
+        var audio = NR.state.ttsAudioElement;
+        NR.ttsState.isStarting = true;
+        setTtsStatus('准备播放...', item.sequence);
+
+        function isCurrent() {
+            return session === ttsSession && attempt === playbackAttempt &&
+                NR.ttsState.currentPlayItem === item;
+        }
+        function failed(error) {
+            if (!isCurrent()) return;
+            clearTimeout(playbackStartTimer);
+            playbackFailure = null;
+            playbackAttempt++;
+            NR.ttsState.isStarting = false;
+            if (error.name === 'NotAllowedError') {
+                NR.ttsState.isPaused = true;
+                NR.ttsState.isPlaying = false;
+                NR.els['tts-status'].textContent = '点击播放按钮开始朗读';
+                NR.els['btn-tts-play-pause'].innerHTML = '▶️';
+                return;
+            }
+            if (!item.cacheAttempted && getFilesystemPlugin()) {
+                item.cacheAttempted = true;
+                var cacheAttempt = playbackAttempt;
+                playbackStartTimer = setTimeout(function() {
+                    if (session === ttsSession && cacheAttempt === playbackAttempt) {
+                        failTts(new Error('音频缓存超时，请重试。'));
+                    }
+                }, 15000);
+                createPlayableAudioSource(item.audioBlob, item.sequence, true).then(function(source) {
+                    if (session !== ttsSession || cacheAttempt !== playbackAttempt) {
+                        cleanupAudioResource(source);
+                        return;
+                    }
+                    clearTimeout(playbackStartTimer);
+                    cleanupAudioResource(item);
+                    Object.assign(item, source);
+                    playCurrentItem(true);
+                }).catch(function(cacheError) {
+                    if (session === ttsSession && cacheAttempt === playbackAttempt) failTts(cacheError);
+                });
+                return;
+            }
+            failTts(new Error('音频无法播放：' + error.message));
+        }
+        playbackFailure = failed;
+        playbackStartTimer = setTimeout(function() {
+            failed(new Error('播放启动超时，请检查音频格式或重试。'));
+        }, 15000);
+        if (loadSource) {
+            audio.src = item.playUrl;
+            audio.load();
+        }
+        Promise.resolve().then(function() {
+            if (isCurrent()) return audio.play();
+        }).then(function() {
+            if (!isCurrent()) return;
+            clearTimeout(playbackStartTimer);
+            NR.ttsState.isStarting = false;
+            NR.ttsState.isPlaying = true;
+            NR.els['tts-status'].textContent = '播放中...';
+            NR.els['btn-tts-play-pause'].innerHTML = '⏸️';
+            highlightAndScrollToPara(item.paragraph);
+        }).catch(failed);
+    }
+
+    NR.onTtsPlaybackError = function(error) {
+        if (NR.ttsState.isActive && playbackFailure) playbackFailure(error);
+    };
 
     function highlightAndScrollToPara(para) {
         requestAnimationFrame(function() {
@@ -1227,9 +1369,14 @@
 
     NR.onAudioEnded = function() {
         if (!NR.ttsState.isActive) return;
+        if (!NR.ttsState.currentPlayItem) return;
+        playbackAttempt++;
+        playbackFailure = null;
+        clearTimeout(playbackStartTimer);
 
         ttsSeqStartTime.delete(NR.ttsState.currentSequence);
         NR.ttsState.isPlaying = false;
+        NR.ttsState.isStarting = false;
         cleanupAudioResource(NR.ttsState.currentPlayItem);
         NR.ttsState.currentPlayItem = null;
         NR.ttsState.currentSequence++;
@@ -1237,7 +1384,7 @@
         setTimeout(function() { tryPlayNext(); }, 0);
     };
 
-    function fetchAudioBlob(chunk, sequence) {
+    function fetchAudioBlob(chunk, sequence, session) {
         var voice = NR.ttsController.getVoiceForTextChunk(chunk);
         var payload = NR.ttsController.getTtsPayload(chunk && chunk.text, voice);
         if (!payload) {
@@ -1249,36 +1396,28 @@
             updateIndicator: voice && voice.id === NR.ttsController.getActiveVoiceId(),
             silent: true
         }).then(function() {
-            var apiUrl = NR.ttsController.getCurrentApiUrl();
+            if (session !== ttsSession) return null;
             var timeoutConfig = getCurrentTtsTimeouts();
-            var controller = new AbortController();
-            var totalTimer = setTimeout(function() {
-                controller.abort();
-            }, timeoutConfig.totalRequestMs);
             setTtsStatus(chunk && chunk.isDialogue
                 ? (NR.ttsController.isIndexTtsProvider() ? '请求对白TTS...IndexTTS较慢，请等待' : '请求对白TTS...')
                 : (NR.ttsController.isIndexTtsProvider() ? '请求TTS...IndexTTS较慢，请等待' : '请求TTS...'), sequence);
 
-            return fetch(apiUrl + '/tts', {
+            return requestTts('/tts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-                cache: 'no-store',
-                signal: controller.signal
-            }).then(function(response) {
-                if (!response.ok) {
-                    return response.text().then(function(errText) {
-                        throw new Error('TTS API Error: ' + response.status + ' ' + errText);
+                body: JSON.stringify(payload)
+            }, timeoutConfig.totalRequestMs, true).then(function(blob) {
+                if (!blob.size) throw new Error('服务端返回了空音频。');
+                if (/json|text\/|html/i.test(blob.type)) {
+                    return blob.text().then(function(message) {
+                        throw new Error('服务端未返回音频：' + message.slice(0, 200));
                     });
                 }
-                setTtsStatus('已收到音频，写入缓存...', sequence);
-                return readAudioBlobWithTimeout(response, controller, timeoutConfig.downloadStallMs);
-            }).finally(function() {
-                clearTimeout(totalTimer);
+                return blob;
             });
         }).catch(function(error) {
             console.error("Failed to fetch TTS audio:", error);
-            setTtsStatus(chunk && chunk.isDialogue ? '对白音色请求失败' : 'API错误');
+            if (session === ttsSession) setTtsStatus('语音请求失败，正在重试...', sequence);
             throw error;
         });
     }
@@ -1288,6 +1427,9 @@
 
         if (NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
             NR.state.ttsAudioElement.pause();
+            playbackAttempt++;
+            playbackFailure = null;
+            clearTimeout(playbackStartTimer);
             NR.ttsState.isPaused = true;
             NR.ttsState.isPlaying = false;
             NR.els['btn-tts-play-pause'].innerHTML = '▶️';
@@ -1300,14 +1442,7 @@
             startTtsPump();
 
             if (NR.ttsState.currentPlayItem) {
-                NR.state.ttsAudioElement.play().then(function() {
-                    NR.ttsState.isPlaying = true;
-                    NR.els['btn-tts-play-pause'].innerHTML = '⏸️';
-                    NR.els['tts-status'].textContent = '播放中...';
-                }).catch(function(e) {
-                    console.error("Resume playback failed:", e);
-                    NR.onAudioEnded();
-                });
+                playCurrentItem(false);
             } else {
                 tryPlayNext();
             }

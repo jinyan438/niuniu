@@ -53,11 +53,8 @@
         NR.state.ttsAudioElement.addEventListener('ended', NR.onAudioEnded);
         NR.state.ttsAudioElement.addEventListener('error', function(e) {
             console.error('Core audio element error:', e);
-            if (NR.ttsState && NR.ttsState.isActive) {
-                var mediaError = NR.state.ttsAudioElement && NR.state.ttsAudioElement.error;
-                NR.els['tts-status'].textContent = '播放失败' + (mediaError && mediaError.code ? ' #' + mediaError.code : '');
-            }
-            NR.onAudioEnded();
+            var mediaError = NR.state.ttsAudioElement && NR.state.ttsAudioElement.error;
+            NR.onTtsPlaybackError(new Error('音频解码或加载失败' + (mediaError ? ' #' + mediaError.code : '')));
         });
 
         NR.loadSettings();
