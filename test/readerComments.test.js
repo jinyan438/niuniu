@@ -4,11 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadComments() {
+function loadComments({ respond = () => [{ persona: '剧情党', comment: '快开宝箱！' }] } = {}) {
     function element() {
         const handlers = {};
         return {
-            dataset: {}, style: {}, children: [], textContent: '', innerHTML: '', disabled: false,
+            dataset: {}, style: {}, children: [], textContent: '', disabled: false,
+            get innerHTML() { return this.html || ''; },
+            set innerHTML(value) { this.html = value; this.children = []; },
             offsetHeight: 30, offsetWidth: 100,
             classList: { add() {}, remove() {} },
             addEventListener(type, handler) { (handlers[type] ||= []).push(handler); },
@@ -25,6 +27,8 @@ function loadComments() {
         'reader-comment-modal', 'reader-comment-list', 'comment-selected-text', 'reader-comment-persona-count', 'reader-comment-context-note'];
     const elements = Object.fromEntries(ids.map((id) => [id, element()]));
     const requests = [];
+    const saved = new Map();
+    const alerts = [];
     const NR = {
         state: {
             currentFileName: 'book.txt', currentBookData: {}, allRenderedPages: [],
@@ -42,18 +46,20 @@ function loadComments() {
         window: { NovelReader: NR, innerWidth: 800, getSelection: () => ({ removeAllRanges() {} }) },
         document: { getElementById: (id) => elements[id] || null, querySelectorAll: () => [], createElement: element, addEventListener() {} },
         console: { log() {}, warn() {}, error() {} },
-        alert(message) { throw new Error(message); },
+        localStorage: { setItem: (key, value) => saved.set(key, value), getItem: key => saved.get(key) || null },
+        alert(message) { alerts.push(message); },
         fetch: async (url, options) => {
             requests.push({ url, body: JSON.parse(options.body) });
-            return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"persona":"剧情党","comment":"快开宝箱！"}]' } }] }) };
+            const result = await respond(requests.at(-1), requests.length);
+            return { ok: true, json: async () => ({ choices: [{ message: { content: typeof result === 'string' ? result : JSON.stringify(result) } }] }) };
         }
     });
-    for (const file of ['characterForm.js', 'comments.js']) {
+    for (const file of ['settings.js', 'characterForm.js', 'comments.js']) {
         vm.runInContext(fs.readFileSync(path.join(__dirname, '../www/js', file), 'utf8'), context);
     }
     NR.initCharacterFormData();
     NR.initCommentFeature();
-    async function generate(chapter = 4) {
+    function open(chapter = 4) {
         NR.state.chapters[0].chap_num = chapter;
         NR.state.chapters[0].title = '第' + chapter + '章';
         NR.state.originalParagraphs[0].textContent = '第' + chapter + '章';
@@ -61,14 +67,21 @@ function loadComments() {
         paragraph.dataset.originalIndex = '2';
         NR.els['content-wrapper'].dispatch('contextmenu', { target: paragraph });
         elements['btn-open-reader-comments'].dispatch('click');
+    }
+    async function flush() {
+        for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+    }
+    async function generate(chapter = 4) {
+        open(chapter);
+        const requestStart = requests.length;
         elements['btn-generate-reader-comments'].dispatch('click');
-        await new Promise((resolve) => setImmediate(resolve));
+        await flush();
         assert.ok(requests.length > 0, elements['reader-comment-list'].innerHTML);
         assert.equal(elements['btn-generate-reader-comments'].disabled, false);
-        assert.equal(NR.state.activeCommentThread.comments[0].text, '快开宝箱！');
-        return requests.at(-1).body.messages[0].content;
+        assert.ok(NR.state.activeCommentThread.comments.length > 0);
+        return requests[requestStart].body.messages[0].content;
     }
-    return { NR, elements, requests, generate };
+    return { NR, elements, requests, generate, open, flush, saved, alerts };
 }
 
 function chapterPayload(NR, prefix) {
@@ -187,4 +200,105 @@ test('the paragraph menu reads the selected paragraph once for touch plus synthe
     assert.equal(calls[0].options.paragraphOnly, true);
     assert.equal(elements['comment-selection-popover'].style.display, 'none');
     assert.equal(requests.length, 0, 'reading must not generate a paragraph comment');
+});
+
+test('adding readers increases generated comments, including name-only readers', async () => {
+    const { NR, elements, requests, generate } = loadComments({ respond: request => {
+        const prompt = request.body.messages[0].content;
+        return NR.state.aiSettings.readerPersonas.map(persona => ({ persona: persona.name, comment: persona.name + '看到了宝箱！' }));
+    } });
+    await generate();
+    assert.equal(NR.state.activeCommentThread.comments.length, 1);
+    NR.state.aiSettings.readerPersonas.push({ name: '新读者', prompt: '' }, { name: '分析党', prompt: '分析伏笔' });
+    const prompt = await generate();
+
+    assert.match(prompt, /当前共3位读者，必须恰好返回3条评论/);
+    assert.match(prompt, /新读者：以普通小说读者的身份/);
+    assert.equal(elements['reader-comment-persona-count'].textContent, '3 位读者人格');
+    assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.persona), ['剧情党', '新读者', '分析党']);
+    assert.equal(requests.length, 2);
+    assert.equal(NR.state.currentBookData.comments.length, 1);
+    assert.equal(elements['reader-comment-list'].children.length, 3);
+});
+
+test('missing readers are requested individually and duplicate or unknown replies do not increase the count', async () => {
+    const { NR, requests, generate } = loadComments({ respond: (request, number) => {
+        if (number === 1) return [
+            { persona: '剧情党', comment: '快开宝箱！' },
+            { persona: '剧情党', comment: '重复评论' },
+            { persona: '不存在的读者', comment: '未知评论' }
+        ];
+        const prompt = request.body.messages[0].content;
+        const persona = prompt.includes('1. 分析党：') ? '分析党' : '吐槽党';
+        return { persona, comment: persona + '也在看宝箱！' };
+    } });
+    NR.state.aiSettings.readerPersonas.push({ name: '分析党', prompt: '分析' }, { name: '吐槽党', prompt: '吐槽' });
+    await generate();
+
+    assert.equal(requests.length, 3);
+    assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.persona), ['剧情党', '分析党', '吐槽党']);
+    for (const request of requests.slice(1)) {
+        const prompt = request.body.messages[0].content;
+        assert.match(prompt, /当前共1位读者，必须恰好返回1条评论/);
+        assert.match(prompt, /选中的木宝箱片段/);
+        assert.doesNotMatch(prompt, /本章尚未读到的真相|后续章节正文/);
+    }
+});
+
+test('complete responses are reordered to match configured readers, including duplicate names', async () => {
+    const { NR, requests, generate } = loadComments({ respond: () => [
+        { persona: '同名', comment: '同名读者甲' }, { persona: '剧情党', comment: '快开宝箱！' },
+        { persona: '同名', comment: '同名读者乙' }
+    ] });
+    NR.state.aiSettings.readerPersonas.push({ name: '同名', prompt: '乐观' }, { name: '同名', prompt: '谨慎' });
+    await generate();
+
+    assert.equal(requests.length, 1);
+    assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.text), ['快开宝箱！', '同名读者甲', '同名读者乙']);
+});
+
+test('failed or truncated responses stop retrying and preserve previously saved comments', async () => {
+    for (const failedResponse of ['[]', '[{"persona":"分析党","comment":"截断', '']) {
+        const { NR, elements, requests, generate, open, flush } = loadComments({ respond: (request, count) =>
+            count === 1 ? [{ persona: '剧情党', comment: '快开宝箱！' }] : failedResponse });
+        await generate();
+        const previous = JSON.stringify(NR.state.currentBookData.comments);
+        NR.state.aiSettings.readerPersonas.push({ name: '分析党', prompt: '分析' });
+        open();
+        elements['btn-generate-reader-comments'].dispatch('click');
+        await flush();
+
+        assert.equal(requests.length, 4, 'one initial request plus one bounded retry for each missing reader');
+        assert.equal(JSON.stringify(NR.state.currentBookData.comments), previous);
+        assert.match(elements['reader-comment-list'].innerHTML, /未返回有效段评/);
+        assert.equal(elements['btn-generate-reader-comments'].disabled, false);
+    }
+});
+
+test('an empty reader list does not send an API request or clear saved comments', async () => {
+    const { NR, elements, requests, generate, open, flush, alerts } = loadComments();
+    await generate();
+    NR.state.aiSettings.readerPersonas = [];
+    open();
+    elements['btn-generate-reader-comments'].dispatch('click');
+    await flush();
+    assert.equal(requests.length, 1);
+    assert.match(alerts[0], /至少一位读者人格/);
+    assert.equal(NR.state.activeCommentThread.comments.length, 1);
+});
+
+test('a delayed generation cannot save comments into another book', async () => {
+    let release;
+    const { NR, elements, requests, open, flush } = loadComments({ respond: () => new Promise(resolve => { release = resolve; }) });
+    open();
+    elements['btn-generate-reader-comments'].dispatch('click');
+    elements['btn-generate-reader-comments'].dispatch('click');
+    await flush();
+    assert.equal(requests.length, 1, 'double clicking must not start another generation');
+    NR.state.currentFileName = 'another.txt';
+    NR.state.currentBookData = { comments: [] };
+    release([{ persona: '剧情党', comment: '旧书的评论' }]);
+    await flush();
+    assert.equal(NR.state.currentBookData.comments.length, 0);
+    assert.equal(elements['btn-generate-reader-comments'].disabled, false);
 });

@@ -503,6 +503,8 @@
             NR.els['btn-add-reader-persona'].addEventListener('click', NR.addReaderPersonaCard);
         }
         if (NR.els['ai-reader-personas']) {
+            NR.els['ai-reader-personas'].addEventListener('input', NR.saveReaderPersonas);
+            NR.els['ai-reader-personas'].addEventListener('change', NR.saveReaderPersonas);
             NR.els['ai-reader-personas'].addEventListener('click', function(e) {
                 var removeBtn = e.target.closest('.reader-persona-card-remove');
                 if (removeBtn) NR.removeReaderPersonaCard(removeBtn);
@@ -1601,7 +1603,7 @@
         NR.setupModal(NR.els['catalog-modal'], NR.els['btn-catalog']);
         NR.setupModal(NR.els['ai-settings-modal'], NR.els['btn-ai-settings']);
         NR.setupModal(NR.els['custom-prompts-modal']);
-        NR.setupModal(NR.els['reader-persona-settings-modal']);
+        NR.setupModal(NR.els['reader-persona-settings-modal'], null, null, NR.saveReaderPersonas);
         NR.setupModal(NR.els['tts-voice-edit-modal'], null, null, function() {
             NR.els['tts-voice-edit-modal'].dataset.id = '';
         });

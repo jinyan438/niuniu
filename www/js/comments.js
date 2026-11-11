@@ -296,39 +296,14 @@
         return parts.length ? parts.join('\n\n') : '暂无选中片段之前章节可用的AI数据库资料。';
     }
 
-    function parseReaderPersonas(value) {
-        if (Array.isArray(value)) {
-            return value.map(function(item, index) {
-                item = item || {};
-                return {
-                    name: String(item.name || ('读者' + (index + 1))).trim(),
-                    prompt: String(item.prompt || '').trim()
-                };
-            }).filter(function(item) { return item.name || item.prompt; });
-        }
-
-        var text = String(value || NR.DEFAULT_READER_PERSONAS_TEXT || '').trim();
-        if (!text) return [];
-        return text.split(/\n+/).map(function(line, index) {
-            line = line.trim();
-            if (!line) return null;
-            var parts = line.split(/[:：]/);
-            var name;
-            var prompt;
-            if (parts.length > 1) {
-                name = parts.shift().trim();
-                prompt = parts.join('：').trim();
-            } else {
-                name = '读者' + (index + 1);
-                prompt = line;
-            }
-            return { name: name || ('读者' + (index + 1)), prompt: prompt || line };
-        }).filter(Boolean);
-    }
-
     function getReaderPersonas() {
-        return parseReaderPersonas(NR.state.aiSettings.readerPersonas || NR.DEFAULT_READER_PERSONAS_TEXT);
+        return NR.normalizeReaderPersonaList(NR.state.aiSettings.readerPersonas || NR.DEFAULT_READER_PERSONAS_TEXT);
     }
+
+    NR.refreshReaderPersonaCount = function() {
+        var label = document.getElementById('reader-comment-persona-count');
+        if (label) label.textContent = getReaderPersonas().length + ' 位读者人格';
+    };
 
     function buildPrompt(selectionInfo, personas) {
         var commentPrompt = NR.state.aiSettings.commentPrompt || NR.DEFAULT_AI_PROMPTS.COMMENT;
@@ -338,7 +313,7 @@
         }).join('\n\n') : '暂无选中片段前面章节的总结。';
 
         var personaText = personas.map(function(persona, index) {
-            return (index + 1) + '. ' + persona.name + '：' + persona.prompt;
+            return (index + 1) + '. ' + persona.name + '：' + (persona.prompt || '以普通小说读者的身份，自然地评论选中片段。');
         }).join('\n');
 
         return [
@@ -349,7 +324,7 @@
             '【本章开头到选中片段为止的文本】\n' + selectionInfo.chapterTextBeforeSelection,
             '【此前章节AI数据库资料（不含本章）】\n' + buildPreviousChaptersAiData(selectionInfo.chapterNumber),
             '【阅读范围约束】\n只能使用选中片段、本章开头至该片段的文本以及此前章节资料。前文数据库记录的是历史已知信息，当前场景和状态以本章已读文本为准；不得将本章未读部分或后续章节内容当作已知事实。',
-            '【最终输出要求】\n请为上面每个读者人格各生成1条评论，像番茄小说段评区一样自然。只输出JSON数组，不要Markdown代码块，不要解释。'
+            '【最终输出要求】\n当前共' + personas.length + '位读者，必须恰好返回' + personas.length + '条评论，每位各1条。persona 字段严格使用上面对应的读者姓名，不得遗漏、重复或合并读者；同名读者也应分别生成。像番茄小说段评区一样自然。只输出JSON数组，数组项格式为{"persona":"读者姓名","comment":"评论内容"}，不要Markdown代码块，不要解释。'
         ].join('\n\n---\n\n');
     }
 
@@ -359,7 +334,7 @@
         if (!comment && typeof item === 'string') comment = item;
         if (!persona && personas[index]) persona = personas[index].name;
         return {
-            persona: persona || ('读者' + (index + 1)),
+            persona: String(persona || ('读者' + (index + 1))).trim(),
             text: String(comment || '').trim(),
             likes: Math.floor(18 + Math.random() * 860),
             replies: Math.floor(Math.random() * 36),
@@ -381,17 +356,59 @@
         }
 
         if (parsed && parsed.comments && Array.isArray(parsed.comments)) parsed = parsed.comments;
+        if (parsed && !Array.isArray(parsed) && (typeof parsed === 'string' || parsed.comment || parsed.content || parsed.text)) parsed = [parsed];
         if (Array.isArray(parsed)) {
             return parsed.map(function(item, index) {
                 return normalizeCommentItem(item, personas, index);
             }).filter(function(item) { return item.text; });
         }
 
+        // A truncated JSON response is not a comment and must be retried.
+        if (/^[\[{]/.test(text)) return [];
+
         return text.split(/\n+/).map(function(line, index) {
             line = line.replace(/^\s*[-*\d.、]+/, '').trim();
             line = line.replace(/^["“]|["”]$/g, '').trim();
             return normalizeCommentItem(line, personas, index);
         }).filter(function(item) { return item.text; });
+    }
+
+    function alignComments(comments, personas) {
+        var remaining = comments.slice();
+        return personas.map(function(persona) {
+            var index = remaining.findIndex(function(item) { return item.persona === persona.name; });
+            return index < 0 ? null : remaining.splice(index, 1)[0];
+        });
+    }
+
+    async function completeReaderComments(selectionInfo, personas, prompt, request, isCurrent) {
+        var generated = alignComments(parseCommentResponse(await request(prompt), personas), personas);
+        if (!isCurrent()) return null;
+        var missing = [];
+        generated.forEach(function(comment, index) { if (!comment) missing.push(index); });
+        var cursor = 0;
+        var errors = [];
+        async function fillMissing() {
+            while (cursor < missing.length && isCurrent()) {
+                var index = missing[cursor++];
+                var persona = personas[index];
+                try {
+                    var content = await request(buildPrompt(selectionInfo, [persona]));
+                    generated[index] = alignComments(parseCommentResponse(content, [persona]), [persona])[0];
+                } catch (error) {
+                    errors.push(error);
+                }
+            }
+        }
+        // Retry each omitted reader once, with at most two requests in flight.
+        await Promise.all(Array.from({ length: Math.min(2, missing.length) }, fillMissing));
+        if (!isCurrent()) return null;
+        var absent = personas.filter(function(persona, index) { return !generated[index]; });
+        if (absent.length) {
+            throw new Error('以下读者未返回有效段评：' + absent.map(function(persona) { return persona.name; }).join('、') +
+                (errors.length ? '。' + errors[0].message : '，请重试。'));
+        }
+        return generated;
     }
 
     function ensureCommentsArray() {
@@ -485,11 +502,9 @@
 
     function updateCommentSheet(thread, selectionInfo) {
         var quote = document.getElementById('comment-selected-text');
-        var personaCount = document.getElementById('reader-comment-persona-count');
         var contextNote = document.getElementById('reader-comment-context-note');
-        var personas = getReaderPersonas();
         if (quote) quote.textContent = '“' + selectionInfo.text + '”';
-        if (personaCount) personaCount.textContent = personas.length + ' 位读者人格';
+        NR.refreshReaderPersonaCount();
         if (contextNote) {
             contextNote.textContent = '上下文：前文总结 + 本章已读文本 + 前文章节AI数据库';
         }
@@ -524,39 +539,54 @@
         }
 
         var button = document.getElementById('btn-generate-reader-comments');
+        if (button && button.disabled) return;
         var personas = getReaderPersonas();
+        if (!personas.length) {
+            alert('请先添加至少一位读者人格。');
+            return;
+        }
+        NR.refreshReaderPersonaCount();
         var prompt = buildPrompt(selectionInfo, personas);
-        thread.comments = [];
-        thread.selectedText = selectionInfo.text;
-        thread.paragraphIndex = selectionInfo.paragraphIndex;
-        saveThread(thread);
+        var bookName = NR.state.currentFileName;
+        var bookData = NR.state.currentBookData;
+        var apiUrl = getFullApiUrl();
+        var apiKey = NR.state.aiSettings.apiKey;
+        var model = NR.state.aiSettings.modelName;
+        var isCurrent = function() {
+            return NR.state.currentFileName === bookName && NR.state.currentBookData === bookData &&
+                NR.state.activeCommentThread === thread;
+        };
         if (button) button.disabled = true;
         renderComments(thread, '正在生成番茄风格段评...');
 
-        return NR.handleAddToShelf().then(function() {
-            return fetch(getFullApiUrl(), {
+        function request(promptText) {
+            return fetch(apiUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: 'Bearer ' + NR.state.aiSettings.apiKey
+                    Authorization: 'Bearer ' + apiKey
                 },
                 body: JSON.stringify({
-                    model: NR.state.aiSettings.modelName,
-                    messages: [{ role: 'user', content: prompt }],
+                    model: model,
+                    messages: [{ role: 'user', content: promptText }],
                     stream: false
                 })
+            }).then(function(res) {
+                if (!res.ok) {
+                    return res.text().then(function(errText) {
+                        throw new Error('API 请求失败: ' + res.status + ' ' + res.statusText + '\n' + errText);
+                    });
+                }
+                return res.json();
+            }).then(function(data) {
+                return data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
             });
-        }).then(function(res) {
-            if (!res.ok) {
-                return res.text().then(function(errText) {
-                    throw new Error('API 请求失败: ' + res.status + ' ' + res.statusText + '\n' + errText);
-                });
-            }
-            return res.json();
-        }).then(function(data) {
-            var content = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
-            var generated = parseCommentResponse(content, personas);
-            if (!generated.length) throw new Error('AI 未返回有效评论。');
+        }
+        return NR.handleAddToShelf().then(function() {
+            if (!isCurrent()) return null;
+            return completeReaderComments(selectionInfo, personas, prompt, request, isCurrent);
+        }).then(function(generated) {
+            if (!generated || !isCurrent()) return;
             thread.comments = generated;
             thread.selectedText = selectionInfo.text;
             thread.paragraphIndex = selectionInfo.paragraphIndex;
@@ -565,7 +595,7 @@
             renderComments(thread);
         }).catch(function(err) {
             console.error('生成段评失败:', err);
-            renderComments(thread, '生成段评时出错：' + err.message, true);
+            if (isCurrent()) renderComments(thread, '生成段评时出错：' + err.message, true);
         }).finally(function() {
             if (button) button.disabled = false;
         });

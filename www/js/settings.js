@@ -102,12 +102,12 @@
         if (typeof NR.applyReaderMode === 'function') NR.applyReaderMode();
     };
 
-    function normalizeReaderPersonaList(value) {
+    NR.normalizeReaderPersonaList = function(value) {
         if (Array.isArray(value)) {
             return value.map(function(item, index) {
                 item = item || {};
                 return {
-                    name: String(item.name || ('读者' + (index + 1))).trim(),
+                    name: String(item.name || '').trim() || ('读者' + (index + 1)),
                     prompt: String(item.prompt || '').trim()
                 };
             }).filter(function(item) { return item.name || item.prompt; });
@@ -130,12 +130,12 @@
             }
             return { name: name || ('读者' + (index + 1)), prompt: prompt || line };
         }).filter(Boolean);
-    }
+    };
 
     NR.renderReaderPersonaCards = function(personas) {
         var container = NR.els['ai-reader-personas'];
         if (!container) return;
-        personas = normalizeReaderPersonaList(personas);
+        personas = NR.normalizeReaderPersonaList(personas);
 
         container.innerHTML = '';
         personas.forEach(function(persona, index) {
@@ -162,7 +162,7 @@
 
     NR.collectReaderPersonaCards = function() {
         var container = NR.els['ai-reader-personas'];
-        if (!container) return normalizeReaderPersonaList(NR.DEFAULT_READER_PERSONAS_TEXT);
+        if (!container) return NR.normalizeReaderPersonaList(NR.state.aiSettings.readerPersonas || NR.DEFAULT_READER_PERSONAS_TEXT);
         return Array.prototype.slice.call(container.querySelectorAll('.reader-persona-card')).map(function(card, index) {
             var nameInput = card.querySelector('.reader-persona-name');
             var promptInput = card.querySelector('.reader-persona-prompt');
@@ -170,13 +170,20 @@
                 name: (nameInput && nameInput.value.trim()) || ('读者' + (index + 1)),
                 prompt: (promptInput && promptInput.value.trim()) || ''
             };
-        }).filter(function(item) { return item.prompt; });
+        });
+    };
+
+    NR.saveReaderPersonas = function() {
+        NR.state.aiSettings.readerPersonas = NR.collectReaderPersonaCards();
+        localStorage.setItem('novelReaderAiSettings', JSON.stringify(NR.state.aiSettings));
+        if (NR.refreshReaderPersonaCount) NR.refreshReaderPersonaCount();
     };
 
     NR.addReaderPersonaCard = function() {
         var personas = NR.collectReaderPersonaCards();
         personas.push({ name: '读者' + (personas.length + 1), prompt: '' });
         NR.renderReaderPersonaCards(personas);
+        NR.saveReaderPersonas();
     };
 
     NR.removeReaderPersonaCard = function(button) {
@@ -184,6 +191,7 @@
         if (!card) return;
         card.remove();
         NR.renderReaderPersonaCards(NR.collectReaderPersonaCards());
+        NR.saveReaderPersonas();
     };
 
     NR.handleSettingsChange = function(event) {
