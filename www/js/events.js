@@ -598,6 +598,9 @@
         NR.els['btn-search-prev'].addEventListener('click', function() { NR.navigateToSearchResult('prev'); });
 
         NR.els['btn-listen-mode'].addEventListener('click', NR.toggleListenMode);
+        NR.els['chapter-info'].addEventListener('click', function() {
+            if (NR.state.isListenMode) NR.startTtsFromCurrentChapter();
+        });
         NR.els['btn-tts-play-pause'].addEventListener('click', NR.toggleTtsPlayback);
         NR.els['btn-tts-stop'].addEventListener('click', function() {
             if (NR.state.isListenMode) {
@@ -616,7 +619,7 @@
                 var chunk = NR.ttsState.textChunks[seq];
                 if (chunk && chunk.paragraph && chunk.paragraph.dataset.originalIndex !== undefined) {
                     if (currentParagraphIndex === null || chunk.paragraph.dataset.originalIndex !== currentParagraphIndex) {
-                        return document.querySelector('p[data-original-index="' + chunk.paragraph.dataset.originalIndex + '"]');
+                        return chunk.paragraph;
                     }
                 }
                 seq += step;
@@ -1367,6 +1370,12 @@
             }
             if (NR.state.isTransitioning || window.getSelection().toString().length > 0) return;
 
+            if (NR.state.isListenMode) {
+                var clickedP = event.target.closest('p:not(.blank-line)');
+                if (clickedP) NR.startTtsFrom(clickedP);
+                return;
+            }
+
             if (NR.state.isInImmersiveMode) {
                 var clickedP = event.target.closest('p:not(.blank-line)');
                 if (clickedP) {
@@ -1387,11 +1396,6 @@
                 return; 
             }
             
-            if (NR.state.isListenMode) {
-                var clickedP = event.target.closest('p:not(.blank-line)');
-                if (clickedP) NR.startTtsFrom(clickedP);
-                return;
-            }
             if (!NR.state.settings.enableSwipePage) return;
             var rect = event.currentTarget.getBoundingClientRect();
             var clickRatio = (event.clientX - rect.left) / rect.width;

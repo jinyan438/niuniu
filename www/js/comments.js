@@ -772,6 +772,7 @@
 
         var popover = document.getElementById('comment-selection-popover');
         var openBtn = document.getElementById('btn-open-reader-comments');
+        var readBtn = document.getElementById('btn-read-paragraph');
         var generateBtn = document.getElementById('btn-generate-reader-comments');
         var closeBtn = document.getElementById('btn-close-reader-comments');
         var modal = document.getElementById('reader-comment-modal');
@@ -782,6 +783,13 @@
             });
         }
         bindPressAction(openBtn, function() { showCommentSheet(false); });
+        bindPressAction(readBtn, function() {
+            var info = NR.state.commentSelectionInfo;
+            if (!info || !info.paragraphElement) return;
+            hideSelectionPopover();
+            clearNativeSelection();
+            NR.startTtsFrom(info.paragraphElement, { paragraphOnly: true });
+        });
         bindPressAction(generateBtn, generateReaderComments);
         bindPressAction(closeBtn, closeCommentSheet);
         if (modal) {

@@ -13,7 +13,7 @@
 - AI 数据库：提取人物、关系和场景信息，维护人物卡片，为后续生成提供上下文。
 - 互动内容：读者人格与段评生成，以及基于小说角色的手机互动模块。
 - 场景生图：支持本地 ComfyUI、Nano Banana Pro/Gemini，以及返回 `data[].url` 的 OpenAI 兼容第三方图像接口。
-- 听书：支持 GPT-SoVITS 和 IndexTTS，可配置主音色、对白音色及合成参数。
+- 听书：支持 GPT-SoVITS、IndexTTS 和 Fish Speech，可配置主音色、对白音色及合成参数；Fish Speech 支持参考音色缓存、提前合成和连续音频调度。
 - 搜索下载：可搜索并导入 TXT/EPUB 小说；此功能依赖第三方接口，其可用性可能发生变化。
 - Legado 书源：兼容导入 JSON、TXT、JS、GZIP、远程地址、`sourceUrls` 清单和 Legado 分享链接，支持发现分类、多源搜索、详情、目录、正文缓存与书源管理。
 
@@ -58,6 +58,14 @@ Windows 下也可以运行一键打包脚本：
 
 项目不内置 API Key。AI、图像和 TTS 功能均使用你自行配置的服务，相关费用、速率限制和内容政策由对应服务商决定。
 
+Fish Speech 使用官方 `/v1/tts` 和 `/v1/references/list` 接口，API 地址可以填写服务根地址或以 `/v1` 结尾的地址。将参考录音及同名 UTF-8 `.lab` 逐字稿放在服务端 `references/音色ID/` 中，例如 `references/muxiaoyu/sample.wav` 和 `sample.lab`，再在阅读器刷新音色；音色 ID 使用英文字母、数字、下划线或短横线。也可通过官方 `/v1/references/add` 接口保存音色；当前 WebUI 的参考上传仅用于当次合成。没有参考音色时可选择“默认音色”。本机启动脚本为 fish-speech 目录下的 `运行API.bat`，默认端口 9882，同时监听 IPv4/IPv6；外网访问需放行该端口。脚本优先使用已下载的 S2-Pro，安装了匹配的 Triton 时自动启用编译加速；`--no-compile` 可关闭编译，`--model drama-3-int4` 可切回 Drama 3。S2-Pro 默认使用 4096 上下文以减少显存，首次编译和预热需要较长时间。
+
+Fish Speech 播放前预缓冲两批文本，随后最多提前合成六批，使用同一个 Web Audio 时钟衔接已准备好的音频；不支持 Web Audio 的设备使用现有音频播放器。暂停会保留当前播放位置。平稳连续播放要求服务平均生成速度快于播放速度，预缓冲不能弥补持续慢于实时的推理。本机 RTX 4090、32 GB 内存实测：Drama 3 INT4 生成 3.16 秒音频耗时 33.82 秒；S2-Pro 编译模式生成 27.68 秒音频耗时 18.15 秒，中长文本已快于实时，16 字短句则接近实时。S2-Pro 的编译优化和 Drama 3 的 SGLang-Omni/Marlin 是不同部署路径，详见 [Fish Speech 推理说明](https://speech.fish.audio/inference/) 与 [Drama 3 INT4 模型说明](https://huggingface.co/fishaudio/drama-3-int4)。
+
+听书音频保留原始段落边界，长段落可拆成多个片段；高亮和自动翻页按实际音频播放时钟推进，支持尚未显示的页面。界面短暂卡顿后会追到当前播放位置，旧播放任务的延迟回调不会覆盖新的高亮。
+
+听书模式下，点击正文中的章节标题可从标题开始连续朗读，点击顶部当前章节名可从本章标题重新开始；听书点击优先于焦点和沉浸阅读。标题使用主音色朗读，例如“第一章，护仙观”。段落间停顿 0.7 秒，同段对白与旁白切换停顿 0.44 秒，进入下一章前停顿 3 秒，标题读完停顿 1.4 秒。长段落内部的合成片段保持连续；等待合成的时间会计入停顿，高亮和翻页等到实际发声时再切换。长按菜单中的“朗读”只读选中的段落。
+
 ## 书源
 
 从书架打开“书源”，可在右上角导入本地文件、粘贴书源内容或网络地址。声明式书源支持常用 JSONPath、XPath、CSS/JSoup、正则、内嵌 JavaScript、GET/POST、请求头和分页规则；纯 JavaScript 单文件书源支持 `search`、`explore`、`getBookInfo`、`getChapters` 与 `getContent` 流程。
@@ -99,6 +107,8 @@ Android 配置当前允许 HTTP/混合内容并开启 WebView 调试，便于连
 ```
 
 ## 开发
+
+每次修改完成并通过相关验证后，主动提交并推送到当前分支的远程仓库，无需再次提醒；用户明确要求暂不推送时除外。此约定同时记录在 [AGENTS.md](AGENTS.md) 中。
 
 修改 `www/` 后，重新同步到 Android 工程：
 

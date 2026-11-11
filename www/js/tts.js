@@ -12,6 +12,11 @@
             downloadStallMs: 60000,
             totalRequestMs: 900000,
             requestStallMs: 900000
+        },
+        fishspeech: {
+            downloadStallMs: 120000,
+            totalRequestMs: 900000,
+            requestStallMs: 1800000
         }
     };
     var ttsWatchdogTimer = null;
@@ -21,6 +26,15 @@
     var playbackStartTimer = null;
     var playbackAttempt = 0;
     var playbackFailure = null;
+    var ttsPlaybackSyncTimer = null;
+    var ttsHighlightTimer = null;
+    var ttsHighlightVersion = 0;
+    var ttsHighlightedParagraph = null;
+    var ttsNaturalPauseTimer = null;
+    var ttsNaturalPauseDeadline = 0;
+    var ttsNaturalPauseRemaining = 0;
+    var ttsLastAudioEndedAt = 0;
+    var TTS_PAUSES = { paragraph: 700, dialogue: 440, chapter: 3000, afterTitle: 1400 };
 
     function normalizeApiUrl(value) {
         var url = String(value || '').trim().replace(/\/+$/, '').replace(/\/(?:tts|voices|docs)$/i, '');
@@ -31,7 +45,8 @@
     // Request binary data explicitly: Capacitor's patched fetch does not expose
     // a real streaming body or consistently honor AbortSignal on Android.
     function requestTts(path, options, timeoutMs, binary, apiUrl) {
-        options = options || {};
+        options = Object.assign({}, options || {});
+        options.headers = Object.assign({ Accept: binary ? 'audio/wav' : 'application/json' }, options.headers || {});
         apiUrl = normalizeApiUrl(apiUrl || NR.ttsController.getCurrentApiUrl());
         var controller = new AbortController();
         var timer;
@@ -88,10 +103,7 @@
     }
 
     function getCurrentTtsTimeouts() {
-        if (NR.ttsController && NR.ttsController.isIndexTtsProvider && NR.ttsController.isIndexTtsProvider()) {
-            return TTS_TIMEOUTS.indextts;
-        }
-        return TTS_TIMEOUTS.gptsovits;
+        return TTS_TIMEOUTS[NR.ttsController.getCurrentProvider()] || TTS_TIMEOUTS.gptsovits;
     }
 
     function getFilesystemPlugin() {
@@ -163,6 +175,15 @@
     function splitParagraphIntoTtsChunks(paragraph) {
         var text = paragraph && paragraph.textContent ? paragraph.textContent : '';
         var chunks = [];
+        if (paragraph && paragraph.classList && paragraph.classList.contains('chapter-title')) {
+            var title = text.trim().replace(/^(第\s*[零〇一二三四五六七八九十百千万两\d\s]+[章回节卷])(.*)$/, function(_, chapter, name) {
+                name = name.replace(/^[\s、，,:：.．-]+/, '').trim();
+                return chapter + (name ? '，' + name : '');
+            });
+            appendTtsChunk(chunks, title, paragraph, false);
+            if (chunks.length) chunks[0].isChapterTitle = true;
+            return chunks;
+        }
         var match;
         var lastIndex = 0;
 
@@ -179,6 +200,20 @@
             appendTtsChunk(chunks, text, paragraph, false);
         }
 
+        return chunks;
+    }
+
+    function addTtsPauses(chunks) {
+        chunks.forEach(function(chunk, index) {
+            var previous = chunks[index - 1];
+            chunk.pauseBeforeMs = 0;
+            if (!previous) return;
+            var newParagraph = previous.paragraph !== chunk.paragraph;
+            if (newParagraph && chunk.isChapterTitle) chunk.pauseBeforeMs = TTS_PAUSES.chapter;
+            else if (newParagraph && previous.isChapterTitle) chunk.pauseBeforeMs = TTS_PAUSES.afterTitle;
+            else if (newParagraph) chunk.pauseBeforeMs = TTS_PAUSES.paragraph;
+            else if (previous.isDialogue !== chunk.isDialogue) chunk.pauseBeforeMs = TTS_PAUSES.dialogue;
+        });
         return chunks;
     }
 
@@ -253,6 +288,7 @@
         pumpActive: false,
         maxConcurrency: 1,
         bufferSize: 2,
+        initialBufferPending: false,
     };
 
     NR.ttsController = {
@@ -260,6 +296,7 @@
             provider: 'gptsovits',
             gptSovitsApiUrl: '',
             indexTtsApiUrl: '',
+            fishSpeechApiUrl: '',
             speedFactor: 1.0,
             topK: 5,
             topP: 1.0,
@@ -270,13 +307,23 @@
             indexTtsVoices: [],
             indexTtsActiveVoiceId: '',
             indexTtsDialogueVoiceId: '',
+            fishSpeechVoices: [{ id: '__default__', name: '默认音色', referenceId: null }],
+            fishSpeechActiveVoiceId: '__default__',
+            fishSpeechDialogueVoiceId: '',
         },
         loadedVoiceId: null,
         indexTtsVoiceCatalogStatus: 'idle',
         isFetchingIndexTtsVoices: false,
+        fishSpeechVoiceCatalogStatus: 'idle',
+        isFetchingFishSpeechVoices: false,
 
         normalizeProvider: function(provider) {
-            return provider === 'indextts' ? 'indextts' : 'gptsovits';
+            return provider === 'indextts' || provider === 'fishspeech' ? provider : 'gptsovits';
+        },
+
+        providerSettingKey: function(suffix, provider) {
+            var prefixes = { gptsovits: 'gptSovits', indextts: 'indexTts', fishspeech: 'fishSpeech' };
+            return prefixes[this.normalizeProvider(provider || this.getCurrentProvider())] + suffix;
         },
 
         migrateLegacySettings: function() {
@@ -302,6 +349,7 @@
             if (!this.settings.indexTtsDialogueVoiceId) this.settings.indexTtsDialogueVoiceId = '';
             if (!this.settings.gptSovitsApiUrl) this.settings.gptSovitsApiUrl = '';
             if (!this.settings.indexTtsApiUrl) this.settings.indexTtsApiUrl = '';
+            if (!Array.isArray(this.settings.fishSpeechVoices)) this.settings.fishSpeechVoices = [{ id: '__default__', name: '默认音色', referenceId: null }];
         },
 
         loadSettings: function() {
@@ -326,33 +374,38 @@
             return this.getCurrentProvider() === 'indextts';
         },
 
+        isFishSpeechProvider: function() {
+            return this.getCurrentProvider() === 'fishspeech';
+        },
+
+        isRemoteVoiceProvider: function() {
+            return this.getCurrentProvider() !== 'gptsovits';
+        },
+
+        getFishSpeechPath: function(path) {
+            return /\/v1$/i.test(normalizeApiUrl(this.settings.fishSpeechApiUrl)) ? path : '/v1' + path;
+        },
+
         getCurrentApiUrl: function() {
-            return normalizeApiUrl(this.isIndexTtsProvider() ? this.settings.indexTtsApiUrl : this.settings.gptSovitsApiUrl);
+            return normalizeApiUrl(this.settings[this.providerSettingKey('ApiUrl')]);
         },
 
         setCurrentApiUrl: function(apiUrl) {
             apiUrl = normalizeApiUrl(apiUrl);
             if (this.getCurrentApiUrl() !== apiUrl) {
                 this.loadedVoiceId = null;
+                if (this.isFishSpeechProvider()) this.fishSpeechVoiceCatalogStatus = 'idle';
                 if (NR.ttsState.isActive) NR.stopTts(false);
             }
-            if (this.isIndexTtsProvider()) {
-                this.settings.indexTtsApiUrl = apiUrl || '';
-            } else {
-                this.settings.gptSovitsApiUrl = apiUrl || '';
-            }
+            this.settings[this.providerSettingKey('ApiUrl')] = apiUrl || '';
         },
 
         getVoicesForProvider: function(provider) {
-            return this.normalizeProvider(provider) === 'indextts' ? this.settings.indexTtsVoices : this.settings.gptSovitsVoices;
+            return this.settings[this.providerSettingKey('Voices', provider)];
         },
 
         setVoicesForProvider: function(provider, voices) {
-            if (this.normalizeProvider(provider) === 'indextts') {
-                this.settings.indexTtsVoices = voices || [];
-            } else {
-                this.settings.gptSovitsVoices = voices || [];
-            }
+            this.settings[this.providerSettingKey('Voices', provider)] = voices || [];
         },
 
         getAvailableVoices: function() {
@@ -360,27 +413,19 @@
         },
 
         getActiveVoiceId: function() {
-            return this.isIndexTtsProvider() ? this.settings.indexTtsActiveVoiceId : this.settings.gptSovitsActiveVoiceId;
+            return this.settings[this.providerSettingKey('ActiveVoiceId')];
         },
 
         setActiveVoiceId: function(voiceId) {
-            if (this.isIndexTtsProvider()) {
-                this.settings.indexTtsActiveVoiceId = voiceId || '';
-            } else {
-                this.settings.gptSovitsActiveVoiceId = voiceId || null;
-            }
+            this.settings[this.providerSettingKey('ActiveVoiceId')] = voiceId || '';
         },
 
         getDialogueVoiceId: function() {
-            return this.isIndexTtsProvider() ? this.settings.indexTtsDialogueVoiceId : this.settings.gptSovitsDialogueVoiceId;
+            return this.settings[this.providerSettingKey('DialogueVoiceId')];
         },
 
         setStoredDialogueVoiceId: function(voiceId) {
-            if (this.isIndexTtsProvider()) {
-                this.settings.indexTtsDialogueVoiceId = voiceId || '';
-            } else {
-                this.settings.gptSovitsDialogueVoiceId = voiceId || '';
-            }
+            this.settings[this.providerSettingKey('DialogueVoiceId')] = voiceId || '';
         },
 
         getVoiceById: function(id, provider) {
@@ -420,16 +465,24 @@
 
         updateProviderUI: function() {
             var isIndexTts = this.isIndexTtsProvider();
+            var isFishSpeech = this.isFishSpeechProvider();
+            var isRemote = this.isRemoteVoiceProvider();
             NR.els['tts-provider-selector'].value = this.getCurrentProvider();
             NR.els['tts-provider-selector-ai'].value = this.getCurrentProvider();
-            NR.els['tts-api-url-label'].textContent = isIndexTts ? 'IndexTTS API 基地址' : 'GPT-SoVITS API 基地址';
-            NR.els['tts-api-url'].placeholder = isIndexTts ? '例如: http://127.0.0.1:9881' : '例如: http://127.0.0.1:9880';
-            NR.els['tts-gptsovits-voice-management'].style.display = isIndexTts ? 'none' : '';
-            NR.els['tts-indextts-provider-hint'].style.display = isIndexTts ? 'block' : 'none';
-            NR.els['tts-gptsovits-params'].style.display = isIndexTts ? 'none' : '';
-            NR.els['tts-refresh-voices-row'].style.display = isIndexTts ? '' : 'none';
+            NR.els['tts-api-url-label'].textContent = (isFishSpeech ? 'Fish Speech' : isIndexTts ? 'IndexTTS' : 'GPT-SoVITS') + ' API 基地址';
+            NR.els['tts-api-url'].placeholder = '例如: http://127.0.0.1:' + (isFishSpeech ? '9882' : isIndexTts ? '9881' : '9880');
+            NR.els['tts-gptsovits-voice-management'].style.display = isRemote ? 'none' : '';
+            NR.els['tts-indextts-provider-hint'].style.display = isRemote ? 'block' : 'none';
+            NR.els['tts-indextts-provider-hint'].textContent = isFishSpeech
+                ? '将参考录音和同名 .lab 文本放入服务端 references/音色ID 文件夹，再刷新音色。'
+                : 'IndexTTS 音色从服务端预设列表获取。';
+            NR.els['tts-gptsovits-params'].style.display = isRemote ? 'none' : '';
+            NR.els['tts-refresh-voices-row'].style.display = isRemote ? '' : 'none';
             if (isIndexTts) {
                 this.updateStatusIndicatorForIndexTts();
+            } else if (isFishSpeech) {
+                NR.els['tts-status-indicator'].className = 'tts-status-indicator ' +
+                    (this.fishSpeechVoiceCatalogStatus === 'loading' ? 'loading' : this.fishSpeechVoiceCatalogStatus === 'error' ? 'error' : 'ready');
             }
         },
 
@@ -531,6 +584,12 @@
         },
 
         maybeFetchIndexTtsVoices: function() {
+            if (this.isFishSpeechProvider()) {
+                if (this.getCurrentApiUrl() && this.fishSpeechVoiceCatalogStatus === 'idle' && !this.isFetchingFishSpeechVoices) {
+                    this.fetchFishSpeechVoices(false, true).catch(function() {});
+                }
+                return;
+            }
             if (!this.isIndexTtsProvider()) return;
             if (this.isFetchingIndexTtsVoices) return;
             if (!this.getCurrentApiUrl()) return;
@@ -573,6 +632,7 @@
         },
 
         refreshVoiceCatalog: function(showAlert) {
+            if (this.isFishSpeechProvider()) return this.fetchFishSpeechVoices(!!showAlert, false);
             if (this.isIndexTtsProvider()) {
                 return this.fetchIndexTtsVoices(!!showAlert, false);
             }
@@ -631,6 +691,34 @@
             }).finally(function() {
                 self.isFetchingIndexTtsVoices = false;
                 self.updateProviderUI();
+            });
+        },
+
+        fetchFishSpeechVoices: function(showAlert, silent) {
+            var self = this;
+            if (!this.settings.fishSpeechApiUrl) return Promise.resolve([]);
+            this.isFetchingFishSpeechVoices = true;
+            this.fishSpeechVoiceCatalogStatus = 'loading';
+            this.renderAllUI();
+            return requestTts(this.getFishSpeechPath('/references/list'), {}, 30000, false,
+                this.settings.fishSpeechApiUrl).then(function(data) {
+                if (data.success === false || !Array.isArray(data.reference_ids)) {
+                    throw new Error(data.message || 'Fish Speech 音色列表格式错误。');
+                }
+                self.settings.fishSpeechVoices = [{ id: '__default__', name: '默认音色', referenceId: null }].concat(
+                    data.reference_ids.map(function(id) { return { id: id, name: id, referenceId: id }; }));
+                self.fishSpeechVoiceCatalogStatus = 'ready';
+                if (self.isFishSpeechProvider()) self.ensureVoiceSelections();
+                self.saveSettings();
+                if (showAlert && !silent) alert('Fish Speech 音色已刷新。');
+                return self.settings.fishSpeechVoices;
+            }).catch(function(error) {
+                self.fishSpeechVoiceCatalogStatus = 'error';
+                if (showAlert && !silent) alert('拉取 Fish Speech 音色失败：\n\n' + error.message);
+                throw error;
+            }).finally(function() {
+                self.isFetchingFishSpeechVoices = false;
+                self.renderAllUI();
             });
         },
 
@@ -817,6 +905,12 @@
         },
 
         loadVoiceById: function(voiceId, options) {
+            if (this.isFishSpeechProvider()) {
+                var voice = this.getVoiceById(voiceId);
+                if (!voice || !this.getCurrentApiUrl()) return Promise.reject(new Error('请配置 Fish Speech API 并选择音色。'));
+                if (options && options.persistSelection) this.saveSettings();
+                return Promise.resolve(voice);
+            }
             if (this.isIndexTtsProvider()) {
                 return this.loadIndexTtsVoiceById(voiceId, options);
             }
@@ -837,6 +931,18 @@
         getTtsPayload: function(text, voice) {
             var activeVoice = voice || this.getVoiceById(this.getActiveVoiceId());
             if (!activeVoice) return null;
+
+            if (this.isFishSpeechProvider()) {
+                return {
+                    text: text,
+                    reference_id: activeVoice.referenceId === null ? null : (activeVoice.referenceId || activeVoice.id),
+                    format: 'wav',
+                    streaming: false,
+                    use_memory_cache: 'on',
+                    chunk_length: 200,
+                    seed: 42
+                };
+            }
 
             if (this.isIndexTtsProvider()) {
                 return {
@@ -890,6 +996,21 @@
     }
 
     function resetTtsState() {
+        clearTimeout(ttsNaturalPauseTimer);
+        ttsNaturalPauseTimer = null;
+        ttsNaturalPauseDeadline = 0;
+        ttsNaturalPauseRemaining = 0;
+        ttsLastAudioEndedAt = 0;
+        clearInterval(ttsPlaybackSyncTimer);
+        ttsPlaybackSyncTimer = null;
+        clearTimeout(ttsHighlightTimer);
+        ttsHighlightVersion++;
+        if (ttsHighlightedParagraph) ttsHighlightedParagraph.classList.remove('speaking-paragraph');
+        ttsHighlightedParagraph = null;
+        if (NR.ttsBufferedPlayer) {
+            NR.ttsBufferedPlayer.close();
+            NR.ttsBufferedPlayer = null;
+        }
         ttsSession++;
         playbackAttempt++;
         playbackFailure = null;
@@ -929,6 +1050,7 @@
             currentPlayItem: null,
             inFlightRequests: 0,
             pumpTimer: null,
+            initialBufferPending: false,
         });
 
         stopTtsWatchdog();
@@ -961,19 +1083,25 @@
                 NR.toggleListenMode();
                 return;
             }
-            alert('听书模式已开启。\n请点击任意段落开始朗读。');
+            alert('听书模式已开启。\n点击章节标题或任意段落开始朗读。');
         }
     };
 
-    function chunkTextAndParagraphs(startParagraphElement) {
+    function chunkTextAndParagraphs(startParagraphElement, paragraphOnly) {
         var chunks = [];
         var allParagraphsInDom = [];
-        NR.state.allRenderedPages.forEach(function(page) {
-            var paras = Array.from(page.querySelectorAll('p:not(.blank-line):not(.chapter-title)'));
-            allParagraphsInDom.push.apply(allParagraphsInDom, paras);
-        });
+        if (paragraphOnly) {
+            allParagraphsInDom.push(startParagraphElement);
+        } else {
+            NR.state.allRenderedPages.forEach(function(page) {
+                var paras = Array.from(page.querySelectorAll('p:not(.blank-line)'));
+                allParagraphsInDom.push.apply(allParagraphsInDom, paras);
+            });
+        }
 
-        var globalStartIndex = allParagraphsInDom.findIndex(function(p) { return p.isSameNode(startParagraphElement); });
+        var globalStartIndex = allParagraphsInDom.findIndex(function(p) {
+            return String(p.dataset.originalIndex) === String(startParagraphElement.dataset.originalIndex);
+        });
         if (globalStartIndex === -1) return [];
 
         var parasToProcess = allParagraphsInDom.slice(globalStartIndex);
@@ -990,10 +1118,56 @@
                 }
             }
         }
-        return chunks;
+        if (!NR.ttsController.isFishSpeechProvider()) return addTtsPauses(chunks);
+        // Keep paragraph boundaries in the audio. The API returns no alignment
+        // marks, so joining paragraphs would lose their real playback positions.
+        var batches = [];
+        chunks.forEach(function(chunk) {
+            var remaining = chunk.text;
+            while (remaining) {
+                var previous = batches[batches.length - 1];
+                var voiceId = NR.ttsController.getVoiceForTextChunk(chunk).id;
+                var limit = batches.length <= 1 ? 60 : 160;
+                if (previous && previous.paragraph === chunk.paragraph && previous.isDialogue === chunk.isDialogue && previous.voiceId === voiceId && previous.text.length + remaining.length + 1 <= limit) {
+                    previous.text += '\n' + remaining;
+                    break;
+                }
+                limit = batches.length === 0 ? 60 : 160;
+                var end = Math.min(limit, remaining.length);
+                if (remaining.length > limit) {
+                    var candidate = remaining.slice(0, limit);
+                    var punctuation = /[。！？!?；;，,]/g;
+                    var match;
+                    while ((match = punctuation.exec(candidate))) {
+                        if (match.index >= limit / 2) end = match.index + 1;
+                    }
+                    // Keep surrogate pairs together when a hard split is needed.
+                    if (/[\uD800-\uDBFF]/.test(remaining.charAt(end - 1))) end--;
+                }
+                batches.push({ text: remaining.slice(0, end), paragraph: chunk.paragraph,
+                    isDialogue: chunk.isDialogue, isChapterTitle: !!chunk.isChapterTitle, voiceId: voiceId });
+                remaining = remaining.slice(end).trim();
+            }
+        });
+        return addTtsPauses(batches);
     }
 
-    NR.startTtsFrom = function(startParagraphElement) {
+    NR.startTtsFromCurrentChapter = function() {
+        var page = NR.state.allRenderedPages[NR.state.currentPage - 1];
+        var firstParagraph = page && page.querySelector('p[data-original-index]');
+        if (!firstParagraph) return;
+        var paragraphIndex = Number(firstParagraph.dataset.originalIndex);
+        var chapters = NR.state.chapters || [];
+        for (var i = chapters.length - 1; i >= 0; i--) {
+            if (Number(chapters[i].p_index) <= paragraphIndex) {
+                var title = NR.state.originalParagraphs[chapters[i].p_index];
+                if (title) NR.startTtsFrom(title);
+                return;
+            }
+        }
+    };
+
+    NR.startTtsFrom = function(startParagraphElement, options) {
         if (!NR.ttsController.getCurrentApiUrl() || !NR.ttsController.getVoiceById(NR.ttsController.getActiveVoiceId())) {
             alert('请先在 AI 设置中配置当前听书引擎的 TTS API，并选择一个有效的音色。');
             if (NR.state.isListenMode) NR.toggleListenMode();
@@ -1002,9 +1176,22 @@
         NR.stopTts(false);
 
         NR.ttsState.isActive = true;
+        NR.ttsState.bufferSize = NR.ttsController.isFishSpeechProvider() ? 6 : 2;
+        NR.ttsState.initialBufferPending = NR.ttsController.isFishSpeechProvider();
+        if (NR.ttsController.isFishSpeechProvider() && NR.BufferedTtsPlayer && (window.AudioContext || window.webkitAudioContext)) {
+            NR.ttsBufferedPlayer = new NR.BufferedTtsPlayer(function(sequence) {
+                if (!NR.ttsState.isActive || NR.ttsState.isPaused) return;
+                syncBufferedPlayback();
+                if (sequence >= NR.ttsState.currentSequence) {
+                    advanceBufferedPlayback(sequence + 1);
+                    tryPlayNext();
+                }
+            });
+            ttsPlaybackSyncTimer = setInterval(syncBufferedPlayback, 50);
+        }
         NR.els['tts-player-controls'].style.display = 'flex';
 
-        NR.ttsState.textChunks = chunkTextAndParagraphs(startParagraphElement);
+        NR.ttsState.textChunks = chunkTextAndParagraphs(startParagraphElement, options && options.paragraphOnly);
         if (NR.ttsState.textChunks.length === 0) {
             NR.els['tts-status'].textContent = '错误: 无内容';
             NR.ttsState.isActive = false;
@@ -1040,8 +1227,8 @@
                     NR.ttsState.audioQueue.set(sequence, Object.assign({}, result, {
                         paragraph: chunk.paragraph
                     }));
-                    tryPlayNext();
                     startTtsPump();
+                    tryPlayNext();
                 }
             })
             .catch(function(err) {
@@ -1099,7 +1286,7 @@
                             NR.ttsState.audioQueue.set(seq, Object.assign({}, result, {
                                 paragraph: chk.paragraph
                             }));
-                            if (seq === NR.ttsState.currentSequence && !NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
+                            if ((seq === NR.ttsState.currentSequence || NR.ttsState.initialBufferPending) && !NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
                                 tryPlayNext();
                             }
                         }
@@ -1109,7 +1296,8 @@
                         console.error('TTS fetch error for sequence ' + seq + ':', err);
                         if (NR.ttsState.isActive) {
                             NR.ttsState.audioQueue.set(seq, { failed: true, error: err });
-                            if (seq === NR.ttsState.currentSequence && !NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
+                            if ((seq === NR.ttsState.currentSequence || NR.ttsState.initialBufferPending) && !NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
+                                if (NR.ttsState.initialBufferPending) { failTts(err); return; }
                                 tryPlayNext();
                             }
                         }
@@ -1135,6 +1323,19 @@
                 if (blob) {
                     return createPlayableAudioSource(blob, sequence).then(function(source) {
                         source.sequence = sequence;
+                        var player = NR.ttsBufferedPlayer;
+                        if (player) {
+                            return player.decode(blob).then(function(buffer) {
+                                if (session === ttsSession && buffer) {
+                                    source.audioBuffer = buffer;
+                                    player.queue(sequence, buffer, chunk.pauseBeforeMs);
+                                }
+                                return source;
+                            }).catch(function(error) {
+                                cleanupAudioResource(source);
+                                throw error;
+                            });
+                        }
                         return source;
                     });
                 }
@@ -1233,6 +1434,16 @@
     function tryPlayNext() {
         if (!NR.ttsState.isActive || NR.ttsState.isPlaying || NR.ttsState.isStarting || NR.ttsState.isPaused) return;
         if (NR.ttsState.currentPlayItem) return;
+        if (NR.ttsState.initialBufferPending) {
+            var needed = Math.min(2, NR.ttsState.textChunks.length);
+            for (var i = 0; i < needed; i++) {
+                if (!NR.ttsState.audioQueue.has(i)) {
+                    setTtsStatus('预缓冲 ' + NR.ttsState.audioQueue.size + '/' + needed + '...');
+                    return;
+                }
+            }
+            NR.ttsState.initialBufferPending = false;
+        }
 
         var nextItem = NR.ttsState.audioQueue.get(NR.ttsState.currentSequence);
 
@@ -1251,7 +1462,11 @@
                 failTts(new Error('没有可播放的音频。'));
                 return;
             }
-            playCurrentItem(true);
+            var chunk = NR.ttsState.textChunks[nextItem.sequence];
+            var remaining = ttsLastAudioEndedAt ? Math.max(0,
+                ((chunk && chunk.pauseBeforeMs) || 0) - (Date.now() - ttsLastAudioEndedAt)) : 0;
+            if (!nextItem.audioBuffer && remaining > 0) queueNaturalPause(nextItem, remaining);
+            else playCurrentItem(true);
         } else if (NR.ttsState.nextSequenceToFetch >= NR.ttsState.textChunks.length && NR.ttsState.inFlightRequests === 0) {
             NR.els['tts-status'].textContent = "朗读完毕";
             NR.els['btn-tts-play-pause'].innerHTML = '▶️';
@@ -1263,9 +1478,35 @@
         }
     }
 
+    function queueNaturalPause(item, remaining) {
+        var session = ttsSession;
+        item.waitingForPause = true;
+        ttsNaturalPauseRemaining = remaining;
+        ttsNaturalPauseDeadline = Date.now() + remaining;
+        NR.ttsState.isPlaying = true;
+        NR.els['tts-status'].textContent = '停顿...';
+        NR.els['btn-tts-play-pause'].innerHTML = '⏸️';
+        ttsNaturalPauseTimer = setTimeout(function() {
+            ttsNaturalPauseTimer = null;
+            ttsNaturalPauseRemaining = 0;
+            ttsNaturalPauseDeadline = 0;
+            if (session !== ttsSession || NR.ttsState.isPaused || NR.ttsState.currentPlayItem !== item) return;
+            item.waitingForPause = false;
+            playCurrentItem(true);
+        }, remaining);
+    }
+
+    function markCurrentAudioStarted(item) {
+        if (!NR.ttsState.isActive || NR.ttsState.isPaused || NR.ttsState.currentPlayItem !== item) return;
+        item.playbackStarted = true;
+        NR.els['tts-status'].textContent = '播放中...';
+        highlightAndScrollToPara(item.paragraph);
+    }
+
     function playCurrentItem(loadSource) {
         var item = NR.ttsState.currentPlayItem;
         if (!item) return;
+        item.playbackStarted = false;
         var session = ttsSession;
         var attempt = ++playbackAttempt;
         var audio = NR.state.ttsAudioElement;
@@ -1289,7 +1530,7 @@
                 NR.els['btn-tts-play-pause'].innerHTML = '▶️';
                 return;
             }
-            if (!item.cacheAttempted && getFilesystemPlugin()) {
+            if (!item.audioBuffer && !item.cacheAttempted && getFilesystemPlugin()) {
                 item.cacheAttempted = true;
                 var cacheAttempt = playbackAttempt;
                 playbackStartTimer = setTimeout(function() {
@@ -1317,12 +1558,13 @@
         playbackStartTimer = setTimeout(function() {
             failed(new Error('播放启动超时，请检查音频格式或重试。'));
         }, 15000);
-        if (loadSource) {
+        if (loadSource && !item.audioBuffer) {
             audio.src = item.playUrl;
             audio.load();
         }
         Promise.resolve().then(function() {
-            if (isCurrent()) return audio.play();
+            if (isCurrent()) return item.audioBuffer && NR.ttsBufferedPlayer
+                ? NR.ttsBufferedPlayer.start(item.sequence) : audio.play();
         }).then(function() {
             if (!isCurrent()) return;
             clearTimeout(playbackStartTimer);
@@ -1330,7 +1572,9 @@
             NR.ttsState.isPlaying = true;
             NR.els['tts-status'].textContent = '播放中...';
             NR.els['btn-tts-play-pause'].innerHTML = '⏸️';
-            highlightAndScrollToPara(item.paragraph);
+            var position = item.audioBuffer && NR.ttsBufferedPlayer ? NR.ttsBufferedPlayer.getPosition() : null;
+            if (!item.audioBuffer || (position && !position.ended && position.sequence === item.sequence)) markCurrentAudioStarted(item);
+            else NR.els['tts-status'].textContent = '停顿...';
         }).catch(failed);
     }
 
@@ -1338,38 +1582,84 @@
         if (NR.ttsState.isActive && playbackFailure) playbackFailure(error);
     };
 
-    function highlightAndScrollToPara(para) {
-        requestAnimationFrame(function() {
-            var paraInDom = document.querySelector('p[data-original-index="' + para.dataset.originalIndex + '"]');
-            if (!paraInDom) return;
-
-            var paraPage = paraInDom.closest('.page');
-            if (!paraPage) return;
-
-            var targetPageNum = NR.state.allRenderedPages.findIndex(function(p) { return p === paraPage; }) + 1;
-
-            var doHighlightAndScroll = function() {
-                var finalParaEl = document.querySelector('p[data-original-index="' + para.dataset.originalIndex + '"]');
-                if (finalParaEl) {
-                    var prevHighlight = document.querySelector('.speaking-paragraph');
-                    if (prevHighlight) prevHighlight.classList.remove('speaking-paragraph');
-                    finalParaEl.classList.add('speaking-paragraph');
-                    finalParaEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            };
-
-            if (targetPageNum > 0 && targetPageNum !== NR.state.currentPage) {
-                NR.jumpToPage(targetPageNum);
-                setTimeout(doHighlightAndScroll, 350);
-            } else {
-                doHighlightAndScroll();
+    function advanceBufferedPlayback(sequence) {
+        playbackAttempt++;
+        clearTimeout(playbackStartTimer);
+        playbackFailure = null;
+        cleanupAudioResource(NR.ttsState.currentPlayItem);
+        NR.ttsState.currentPlayItem = null;
+        NR.ttsState.audioQueue.forEach(function(item, key) {
+            if (key < sequence) {
+                cleanupAudioResource(item);
+                NR.ttsState.audioQueue.delete(key);
             }
         });
+        ttsSeqStartTime.forEach(function(value, key) { if (key < sequence) ttsSeqStartTime.delete(key); });
+        NR.ttsState.currentSequence = sequence;
+        NR.ttsState.isPlaying = false;
+        NR.ttsState.isStarting = false;
+    }
+
+    function syncBufferedPlayback() {
+        if (!NR.ttsState.isActive || NR.ttsState.isPaused || !NR.ttsBufferedPlayer) return;
+        var position = NR.ttsBufferedPlayer.getPosition();
+        if (position && position.sequence > NR.ttsState.currentSequence) {
+            advanceBufferedPlayback(position.sequence);
+            tryPlayNext();
+        }
+        var item = NR.ttsState.currentPlayItem;
+        if (position && !position.ended && item && !item.playbackStarted && position.sequence === item.sequence) markCurrentAudioStarted(item);
+    }
+
+    NR.syncTtsPlayback = syncBufferedPlayback;
+
+    function highlightAndScrollToPara(para) {
+        if (!para || para.dataset.originalIndex === undefined) return;
+        var session = ttsSession;
+        var sequence = NR.ttsState.currentSequence;
+        var version = ++ttsHighlightVersion;
+        var selector = 'p[data-original-index="' + para.dataset.originalIndex + '"]';
+        clearTimeout(ttsHighlightTimer);
+        function follow() {
+            if (session !== ttsSession || version !== ttsHighlightVersion || !NR.ttsState.isActive ||
+                sequence !== NR.ttsState.currentSequence) return;
+            // Pages outside the current/adjacent pages (or current chapter in
+            // scroll mode) are detached, but are still in allRenderedPages.
+            var paragraphElement = null;
+            var target = NR.state.allRenderedPages.findIndex(function(page) {
+                var found = page.querySelector(selector);
+                if (found) paragraphElement = found;
+                return !!found;
+            });
+            if (target < 0) return;
+            // Color the cached page before the turn starts so it is already
+            // correct when mounted, rather than showing the old paragraph for
+            // the duration of the animation plus a delayed callback.
+            if (ttsHighlightedParagraph !== paragraphElement) {
+                if (ttsHighlightedParagraph) ttsHighlightedParagraph.classList.remove('speaking-paragraph');
+                var previous = document.querySelector('.speaking-paragraph');
+                if (previous && previous !== paragraphElement) previous.classList.remove('speaking-paragraph');
+                paragraphElement.classList.add('speaking-paragraph');
+                ttsHighlightedParagraph = paragraphElement;
+            }
+            if (!NR.state.isTransitioning && target + 1 !== NR.state.currentPage) NR.jumpToPage(target + 1);
+            if (NR.state.isTransitioning) {
+                ttsHighlightTimer = setTimeout(follow, 30);
+                return;
+            }
+            var currentContainer = NR.els['current-page-container'];
+            var element = currentContainer && currentContainer.querySelector ? currentContainer.querySelector(selector) : null;
+            element = element || document.querySelector(selector);
+            if (!element) return;
+            element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+        }
+        follow();
     }
 
     NR.onAudioEnded = function() {
         if (!NR.ttsState.isActive) return;
         if (!NR.ttsState.currentPlayItem) return;
+        ttsLastAudioEndedAt = Date.now();
         playbackAttempt++;
         playbackFailure = null;
         clearTimeout(playbackStartTimer);
@@ -1402,7 +1692,7 @@
                 ? (NR.ttsController.isIndexTtsProvider() ? '请求对白TTS...IndexTTS较慢，请等待' : '请求对白TTS...')
                 : (NR.ttsController.isIndexTtsProvider() ? '请求TTS...IndexTTS较慢，请等待' : '请求TTS...'), sequence);
 
-            return requestTts('/tts', {
+            return requestTts(NR.ttsController.isFishSpeechProvider() ? NR.ttsController.getFishSpeechPath('/tts') : '/tts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -1426,6 +1716,13 @@
         if (!NR.ttsState.isActive) return;
 
         if (NR.ttsState.isPlaying && !NR.ttsState.isPaused) {
+            syncBufferedPlayback();
+            if (ttsNaturalPauseTimer) {
+                ttsNaturalPauseRemaining = Math.max(0, ttsNaturalPauseDeadline - Date.now());
+                clearTimeout(ttsNaturalPauseTimer);
+                ttsNaturalPauseTimer = null;
+            }
+            if (NR.ttsBufferedPlayer) NR.ttsBufferedPlayer.pause();
             NR.state.ttsAudioElement.pause();
             playbackAttempt++;
             playbackFailure = null;
@@ -1442,7 +1739,8 @@
             startTtsPump();
 
             if (NR.ttsState.currentPlayItem) {
-                playCurrentItem(false);
+                if (NR.ttsState.currentPlayItem.waitingForPause) queueNaturalPause(NR.ttsState.currentPlayItem, ttsNaturalPauseRemaining);
+                else playCurrentItem(false);
             } else {
                 tryPlayNext();
             }

@@ -21,7 +21,7 @@ function loadComments() {
             getBoundingClientRect: () => ({ width: 200, top: 150, left: 40 })
         };
     }
-    const ids = ['comment-selection-popover', 'btn-open-reader-comments', 'btn-generate-reader-comments', 'btn-close-reader-comments',
+    const ids = ['comment-selection-popover', 'btn-open-reader-comments', 'btn-read-paragraph', 'btn-generate-reader-comments', 'btn-close-reader-comments',
         'reader-comment-modal', 'reader-comment-list', 'comment-selected-text', 'reader-comment-persona-count', 'reader-comment-context-note'];
     const elements = Object.fromEntries(ids.map((id) => [id, element()]));
     const requests = [];
@@ -170,4 +170,21 @@ test('only text through the selected paragraph is sent and regenerating comments
     assert.equal(requests.length, 2);
     assert.equal(NR.state.currentBookData.comments.length, 1);
     assert.equal(JSON.stringify(NR.state.currentBookData.npcHistory), snapshot);
+});
+
+test('the paragraph menu reads the selected paragraph once for touch plus synthetic click', () => {
+    const { NR, elements, requests } = loadComments();
+    const paragraph = { dataset: { originalIndex: '2' }, classList: { add() {} },
+        getBoundingClientRect: () => ({ width: 200, top: 150, left: 40 }), closest() { return this; } };
+    const calls = [];
+    NR.startTtsFrom = (p, options) => calls.push({ p, options });
+    NR.els['content-wrapper'].dispatch('contextmenu', { target: paragraph });
+    assert.equal(elements['comment-selection-popover'].style.display, 'flex');
+    elements['btn-read-paragraph'].dispatch('touchend');
+    elements['btn-read-paragraph'].dispatch('click');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].p, paragraph);
+    assert.equal(calls[0].options.paragraphOnly, true);
+    assert.equal(elements['comment-selection-popover'].style.display, 'none');
+    assert.equal(requests.length, 0, 'reading must not generate a paragraph comment');
 });

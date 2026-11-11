@@ -320,6 +320,7 @@
                         <select id="tts-provider-selector">
                             <option value="gptsovits">GPT-SoVITS</option>
                             <option value="indextts">IndexTTS</option>
+                            <option value="fishspeech">Fish Speech</option>
                         </select>
                     </div>
 
@@ -337,8 +338,8 @@
                     </div>
 
                     <div class="setting-item" id="tts-refresh-voices-row" style="display: none;">
-                        <span>IndexTTS 预设</span>
-                        <button id="btn-refresh-tts-voices" class="control-button">刷新预设</button>
+                        <span>服务端音色</span>
+                        <button id="btn-refresh-tts-voices" class="control-button">刷新音色</button>
                     </div>
 
                     <div class="setting-item">
@@ -473,6 +474,7 @@
                             <select id="tts-provider-selector-ai">
                                 <option value="gptsovits">GPT-SoVITS</option>
                                 <option value="indextts">IndexTTS</option>
+                                <option value="fishspeech">Fish Speech</option>
                             </select>
                         </div>
                         <div class="setting-item"><span id="tts-api-url-label">TTS API 基地址</span><input type="text" id="tts-api-url" placeholder="例如: http://127.0.0.1:9880"></div>
@@ -813,6 +815,7 @@
 
         <div id="comment-selection-popover" class="comment-selection-popover" style="display:none;">
             <button id="btn-open-reader-comments" type="button">段评</button>
+            <button id="btn-read-paragraph" type="button">朗读</button>
         </div>
 
         <div id="reader-comment-modal" class="modal reader-comment-modal">
@@ -888,6 +891,7 @@
     <script src="js/parser.js"></script>
     <script src="js/ui.js"></script>
     <script src="js/settings.js"></script>
+    <script src="js/ttsBufferedPlayer.js"></script>
     <script src="js/tts.js"></script>
     <script src="js/search.js"></script>
     <script src="js/core.js"></script>
