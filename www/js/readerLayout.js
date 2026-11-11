@@ -52,6 +52,7 @@
     }
 
     function getPageForParagraph(paragraphIndex) {
+        if (NR.state.readerPageRanges && NR.getPageForParagraph) return NR.getPageForParagraph(Number(paragraphIndex));
         var pages = NR.state.allRenderedPages || [];
         var target = Number(paragraphIndex);
         var low = 0;
@@ -330,7 +331,9 @@
                 ? Number(item.dataset.chapterIndex)
                 : (NR.state.chapters || []).findIndex(function(chapter) { return chapter.p_id === item.dataset.pId; });
             var count = 0;
-            if (chapterIndex >= 0 && NR.getTextForChapter) {
+            if (chapterIndex >= 0 && NR.state.chapters[chapterIndex] && typeof NR.state.chapters[chapterIndex].charCount === 'number') {
+                count = NR.state.chapters[chapterIndex].charCount;
+            } else if (chapterIndex >= 0 && NR.getTextForChapter) {
                 var text = NR.getTextForChapter(chapterIndex + 1);
                 count = text ? text.length : 0;
             }

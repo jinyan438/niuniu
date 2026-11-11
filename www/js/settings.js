@@ -310,9 +310,10 @@
         }
     };
 
-    NR.applyCustomFont = function(file, fileName) {
+    NR.applyCustomFont = function(file, fileName, revision) {
         NR.removeCustomFont();
         NR.state.currentCustomFontUrl = URL.createObjectURL(file);
+        NR.state.currentCustomFontKey = revision || [fileName, file.size, file.lastModified || 0].join(':');
         var style = document.createElement("style");
         style.id = "custom-font-stylesheet";
         style.textContent = "@font-face { font-family: 'user-custom-font'; src: url('" + NR.state.currentCustomFontUrl + "'); }";
@@ -328,6 +329,7 @@
             URL.revokeObjectURL(NR.state.currentCustomFontUrl);
             NR.state.currentCustomFontUrl = null;
         }
+        NR.state.currentCustomFontKey = null;
         document.body.style.fontFamily = "";
         NR.els['custom-font-status'].textContent = "未设置";
         NR.els['font-file-input'].value = "";
@@ -358,7 +360,7 @@
 
     NR.loadAndApplyAssetsFromDB = function() {
         return NR.storageDB.loadAsset("custom-font").then(function(fontAsset) {
-            if (fontAsset) NR.applyCustomFont(fontAsset.data, fontAsset.name);
+            if (fontAsset) NR.applyCustomFont(fontAsset.data, fontAsset.name, fontAsset.revision);
             return NR.storageDB.loadAsset("custom-bg-image");
         }).then(function(bgImageAsset) {
             if (bgImageAsset) NR.applyCustomBgImage(bgImageAsset.data);

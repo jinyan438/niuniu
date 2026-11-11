@@ -7,7 +7,7 @@
         init: function() {
             var self = this;
             return new Promise(function(resolve, reject) {
-                var request = indexedDB.open("NovelReaderDatabase", 4); // 升级版本号
+                var request = indexedDB.open("NovelReaderDatabase", 5);
                 request.onupgradeneeded = function(event) {
                     var db = event.target.result;
                     if (!db.objectStoreNames.contains("assets")) {
@@ -21,6 +21,9 @@
                     }
                     if (!db.objectStoreNames.contains("bookSources")) {
                         db.createObjectStore("bookSources", { keyPath: "bookSourceUrl" });
+                    }
+                    if (!db.objectStoreNames.contains("readerLayouts")) {
+                        db.createObjectStore("readerLayouts", { keyPath: "id" });
                     }
                 };
                 request.onsuccess = function(event) {
@@ -205,24 +208,46 @@
                 };
             });
         },
+        loadReaderLayout: function(id) {
+            var self = this;
+            return new Promise(function(resolve, reject) {
+                var store = self._getStore('readerLayouts', 'readonly');
+                if (!store) { resolve(null); return; }
+                var req = store.get(id);
+                req.onsuccess = function() { resolve(req.result); };
+                req.onerror = function() { reject(req.error); };
+            });
+        },
+        saveReaderLayout: function(layout) {
+            var self = this;
+            return new Promise(function(resolve, reject) {
+                var store = self._getStore('readerLayouts', 'readwrite');
+                if (!store) { resolve(); return; }
+                store.put(layout);
+                store.transaction.oncomplete = function() { resolve(); };
+                store.transaction.onabort = function() { reject(store.transaction.error); };
+            });
+        },
         deleteBook: function(id) {
             var self = this;
             return new Promise(function(resolve, reject) {
-                var store = self._getStore('books', 'readwrite');
-                if (!store) { resolve(); return; }
-                var req = store.delete(id);
-                req.onsuccess = resolve;
-                req.onerror = function(e) { reject("Failed to delete book: " + e.target.error); };
+                if (!self.db) { resolve(); return; }
+                var transaction = self.db.transaction(['books', 'readerLayouts'], 'readwrite');
+                transaction.objectStore('books').delete(id);
+                transaction.objectStore('readerLayouts').delete(id);
+                transaction.oncomplete = function() { resolve(); };
+                transaction.onabort = function() { reject(transaction.error); };
             });
         },
         clearBooks: function() {
             var self = this;
             return new Promise(function(resolve, reject) {
-                var store = self._getStore('books', 'readwrite');
-                if (!store) { resolve(); return; }
-                var req = store.clear();
-                req.onsuccess = resolve;
-                req.onerror = function(e) { reject("Failed to clear books: " + e.target.error); };
+                if (!self.db) { resolve(); return; }
+                var transaction = self.db.transaction(['books', 'readerLayouts'], 'readwrite');
+                transaction.objectStore('books').clear();
+                transaction.objectStore('readerLayouts').clear();
+                transaction.oncomplete = function() { resolve(); };
+                transaction.onabort = function() { reject(transaction.error); };
             });
         },
         saveBookSource: function(source) {

@@ -228,11 +228,15 @@
                 return;
             }
             var pId = catalogItem.dataset.pId;
-            var targetPage = -1;
-            for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
-                if (NR.state.allRenderedPages[i].querySelector('#' + pId)) {
-                    targetPage = i + 1;
-                    break;
+            var targetPage = NR.state.readerPageRanges && NR.getPageForParagraph
+                ? NR.getPageForParagraph(Number(String(pId).replace('chap-', '')))
+                : -1;
+            if (!NR.state.readerPageRanges) {
+                for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
+                    if (NR.state.allRenderedPages[i].querySelector('#' + pId)) {
+                        targetPage = i + 1;
+                        break;
+                    }
                 }
             }
             if (targetPage !== -1) {
@@ -347,6 +351,7 @@
                             NR.state.chapters = [];
                             NR.state.originalParagraphs = [];
                             NR.state.allRenderedPages = [];
+                            NR.state.readerPageRanges = null;
                         }
                         NR.populateFilterDropdown();
                         NR.renderBookshelf();
@@ -510,8 +515,9 @@
         NR.els['font-file-input'].addEventListener('change', function(e) {
             var t = e.target.files[0];
             if (!t) return;
-            NR.storageDB.saveAsset({ id: "custom-font", name: t.name, data: t }).then(function() {
-                NR.applyCustomFont(t, t.name);
+            var revision = Date.now();
+            NR.storageDB.saveAsset({ id: "custom-font", name: t.name, data: t, revision: revision }).then(function() {
+                NR.applyCustomFont(t, t.name, revision);
                 NR.state.fontSettingsChanged = true;
             }).catch(function(err) {
                 console.error("Error handling font file:", err);

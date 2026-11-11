@@ -71,7 +71,9 @@
         NR.els['content-inner'].style.transform = 'translateX(' + NR.state.currentTranslate + 'px)';
         NR.els['content-inner'].offsetHeight;
         NR.els['content-inner'].classList.remove('is-dragging');
-        if (NR.refreshCommentMarkers) NR.refreshCommentMarkers();
+        if (NR.refreshCommentMarkers) {
+            NR.refreshCommentMarkers(NR.state.allRenderedPages.slice(Math.max(0, NR.state.currentPage - 2), NR.state.currentPage + 1));
+        }
     };
 
     NR.getChapterInfoForPage = function(pageNumber) {
@@ -89,6 +91,10 @@
         if (!currentChap) return null;
         var nextChap = NR.state.chapters.find(function(c) { return c.chap_num === currentChap.chap_num + 1; });
         var findPageForPIndex = function(idx) {
+            if (NR.state.readerPageRanges && NR.getPageForParagraph) {
+                var page = NR.getPageForParagraph(idx);
+                return page > 0 ? page : NR.state.totalPages;
+            }
             for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
                 var firstP = NR.state.allRenderedPages[i].querySelector("p[data-original-index]");
                 if (firstP && parseInt(firstP.dataset.originalIndex, 10) >= idx) {
@@ -241,8 +247,8 @@
             catalogChapters.forEach(function(chap, index) {
                 var li = document.createElement('li');
                 li.textContent = chap.title;
+                li.dataset.chapterIndex = String(index);
                 if (onlineSession) {
-                    li.dataset.chapterIndex = String(index);
                     if (onlineSession.loadedIndexes && onlineSession.loadedIndexes.has(index)) li.classList.add('online-cached');
                 } else {
                     li.dataset.pId = chap.p_id;

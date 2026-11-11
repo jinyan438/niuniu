@@ -1,8 +1,43 @@
 // 核心功能
 (function() {
     var NR = window.NovelReader;
+    var preparedBook = null;
+    var paginationSequence = 0;
+    var loadSequence = 0;
+
+    // Preserve the array API used by search, TTS and AI, but only build DOM
+    // nodes for paragraphs and pages that those features actually request.
+    function lazyArray(length, create) {
+        var items = new Array(length);
+        for (var i = 0; i < length; i++) {
+            (function(index) {
+                Object.defineProperty(items, index, {
+                    configurable: true,
+                    enumerable: true,
+                    get: function() {
+                        var value = create(index);
+                        Object.defineProperty(items, index, { value: value, writable: true, configurable: true, enumerable: true });
+                        return value;
+                    }
+                });
+            })(i);
+        }
+        return items;
+    }
+
+    function contentFingerprint(text) {
+        var first = 2166136261;
+        var second = 5381;
+        for (var i = 0; i < text.length; i++) {
+            var code = text.charCodeAt(i);
+            first = Math.imul(first ^ code, 16777619);
+            second = Math.imul(second, 33) ^ code;
+        }
+        return text.length + ':' + (first >>> 0) + ':' + (second >>> 0);
+    }
 
     NR.loadBook = function(fileName, content, options) {
+        var loadId = ++loadSequence;
         options = options || {};
         if (NR.bookSourceState && NR.bookSourceState.onlineReader && NR.bookSourceState.onlineReader.fileName !== fileName) {
             NR.bookSourceState.onlineReader = null;
@@ -18,13 +53,14 @@
         }
         NR.updatePageInfo(0, 0, true);
         NR.prepareContent(content);
-        return NR.preloadImages(NR.state.epubImagePreloadList, 2000).then(function() {
-            return new Promise(function(resolve) {
-                setTimeout(function() {
-                    NR.paginate().then(resolve);
-                }, 50);
-            });
+        return Promise.all([
+            NR.preloadImages(NR.state.epubImagePreloadList, 2000),
+            document.fonts ? document.fonts.ready : Promise.resolve()
+        ]).then(function() {
+            if (loadId !== loadSequence) return;
+            return NR.paginate();
         }).then(function() {
+            if (loadId !== loadSequence) return;
             var startPage = 1;
             if (NR.state.activeSubView === 'original' && !options.isRepagination) {
                 var savedPage = NR.loadProgress(NR.state.currentFileName);
@@ -86,11 +122,35 @@
     };
 
     NR.prepareContent = function(text) {
-        NR.state.chapters = [];
+        paginationSequence++;
+        text = text || '';
+        if (preparedBook && preparedBook.text === text) {
+            NR.state.chapters = preparedBook.chapters;
+            NR.state.originalParagraphs = preparedBook.paragraphs;
+            NR.populateCatalog();
+            return;
+        }
+        var lines = NR.getReaderContentLines(text);
+        var chapters = [];
+        var visibleIndexes = [];
+        var chapterIndexes = new Set();
+        lines.forEach(function(line, index) {
+            var trimmed = line.trim();
+            if (trimmed) visibleIndexes.push(index);
+            if (NR.isChapterTitle(trimmed)) {
+                chapters.push({ title: trimmed, p_id: 'chap-' + index, p_index: index, chap_num: chapters.length + 1, charCount: 0 });
+                chapterIndexes.add(index);
+            }
+            if (chapters.length) {
+                var chapter = chapters[chapters.length - 1];
+                chapter.charCount += (index > chapter.p_index ? 1 : 0) + (trimmed && !trimmed.startsWith(':::EPUB_IMG:::') ? line.length : 0);
+            }
+        });
         // 匹配中文引号 "" 、英文引号 "" 和日式引号 「」
         var dialogueRegex = /(\u201c[^\u201d]*\u201d|"[^"]*"|「[^」]*」)/g;
         var IMG_MARK = ':::EPUB_IMG:::';
-        NR.state.originalParagraphs = NR.getReaderContentLines(text).map(function(pText, index) {
+        var createParagraph = function(index) {
+            var pText = lines[index];
             var p = document.createElement('p');
             p.dataset.originalIndex = index;
             var trimmedText = pText.trim();
@@ -103,69 +163,180 @@
             } else if (trimmedText === '') {
                 p.classList.add('blank-line');
             } else {
-                if (NR.isChapterTitle(trimmedText)) {
-                    var chapId = 'chap-' + index;
-                    NR.state.chapters.push({
-                        title: trimmedText,
-                        p_id: chapId,
-                        p_index: index,
-                        chap_num: NR.state.chapters.length + 1
-                    });
-                    p.id = chapId;
+                if (chapterIndexes.has(index)) {
+                    p.id = 'chap-' + index;
                     p.classList.add('chapter-title');
                 }
                 p.innerHTML = NR.escapeHtml(pText).replace(dialogueRegex, '<span class="dialogue">$1</span>');
             }
             return p;
-        });
+        };
+        preparedBook = {
+            text: text,
+            contentKey: contentFingerprint(text),
+            chapters: chapters,
+            visibleIndexes: visibleIndexes,
+            chapterIndexes: chapterIndexes,
+            createParagraph: createParagraph,
+            paragraphs: lazyArray(lines.length, createParagraph)
+        };
+        NR.state.chapters = chapters;
+        NR.state.originalParagraphs = preparedBook.paragraphs;
         NR.populateCatalog();
     };
 
-    NR.paginate = function() {
-        return new Promise(function(resolve) {
-            NR.state.viewportWidth = NR.els['content-wrapper'].clientWidth;
-            if (NR.state.viewportWidth === 0) {
-                setTimeout(function() { NR.paginate().then(resolve); }, 50);
+    function installPageRanges(book, ranges) {
+        NR.state.readerPageRanges = ranges;
+        NR.state.allRenderedPages = lazyArray(ranges.length, function(index) {
+            var page = document.createElement('div');
+            page.className = 'page';
+            for (var i = ranges[index][0]; i < ranges[index][1]; i++) {
+                var p = book.paragraphs[i];
+                if (!p.classList.contains('blank-line')) page.appendChild(p.cloneNode(true));
+            }
+            return page;
+        });
+        NR.state.totalPages = ranges.length;
+    }
+
+    function validPageRanges(ranges, book) {
+        if (!Array.isArray(ranges)) return false;
+        var indexes = book.visibleIndexes;
+        var cursor = 0;
+        for (var i = 0; i < ranges.length; i++) {
+            var range = ranges[i];
+            if (!Array.isArray(range) || range.length !== 2 || !Number.isSafeInteger(range[0]) ||
+                !Number.isSafeInteger(range[1]) || range[0] !== indexes[cursor] || range[1] <= range[0]) return false;
+            while (cursor < indexes.length && indexes[cursor] < range[1]) {
+                if (indexes[cursor] !== range[0] && book.chapterIndexes.has(indexes[cursor])) return false;
+                cursor++;
+            }
+            if (range[1] !== indexes[cursor - 1] + 1) return false;
+        }
+        return cursor === indexes.length;
+    }
+
+    NR.getPageForParagraph = function(paragraphIndex) {
+        paragraphIndex = Number(paragraphIndex);
+        if (!Number.isSafeInteger(paragraphIndex) || paragraphIndex < 0) return -1;
+        var ranges = NR.state.readerPageRanges || [];
+        var low = 0;
+        var high = ranges.length - 1;
+        while (low <= high) {
+            var middle = (low + high) >>> 1;
+            if (paragraphIndex < ranges[middle][0]) high = middle - 1;
+            else if (paragraphIndex >= ranges[middle][1]) low = middle + 1;
+            else return middle + 1;
+        }
+        return -1;
+    };
+
+    NR.paginate = async function() {
+        var sequence = ++paginationSequence;
+        NR.state.viewportWidth = NR.els['content-wrapper'].clientWidth;
+        if (!NR.state.viewportWidth) {
+            await new Promise(function(resolve) { setTimeout(resolve, 50); });
+            return NR.paginate();
+        }
+        var book = preparedBook;
+        var bookName = NR.state.activeSubView === 'original' ? NR.state.currentFileName : '';
+        var ruler = NR.els['calculation-ruler'];
+        ruler.classList.add('page');
+        ruler.style.width = NR.state.viewportWidth + 'px';
+        ruler.style.height = NR.els['content-wrapper'].clientHeight + 'px';
+        ruler.style.fontFamily = getComputedStyle(document.body).fontFamily;
+        ruler.innerHTML = '';
+        try {
+            var style = getComputedStyle(ruler);
+            var height = ruler.clientHeight;
+            var padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+            // Store paragraph ranges, never DOM or mutable reading data. Fonts,
+            // viewport and all text metrics must match before reusing a layout.
+            var layoutKey = JSON.stringify([
+                1, ruler.clientWidth, height, style.fontFamily, style.fontSize, style.fontWeight,
+                style.fontStyle, style.lineHeight, style.letterSpacing, style.paddingTop, style.paddingBottom,
+                style.paddingLeft, style.paddingRight, style.wordBreak, style.overflowWrap,
+                document.body.className, NR.state.currentCustomFontKey
+            ]);
+            if (book.layoutKey === layoutKey && book.ranges) {
+                installPageRanges(book, book.ranges);
                 return;
             }
-            var ruler = NR.els['calculation-ruler'];
-            ruler.classList.add('page');
-            ruler.style.width = NR.state.viewportWidth + 'px';
-            ruler.style.height = NR.els['content-wrapper'].clientHeight + 'px';
-            ruler.style.fontFamily = getComputedStyle(document.body).fontFamily;
-            
-            NR.state.allRenderedPages = [];
-            var currentPageParas = [];
-            var createPage = function(paras) {
-                if (paras.length === 0) return;
-                var pageDiv = document.createElement('div');
-                pageDiv.className = 'page';
-                paras.forEach(function(p) { pageDiv.appendChild(p.cloneNode(true)); });
-                NR.state.allRenderedPages.push(pageDiv);
-            };
-            for (var i = 0; i < NR.state.originalParagraphs.length; i++) {
-                var p = NR.state.originalParagraphs[i];
-                // 空行只保留在原始段落中以稳定索引，阅读间距统一由段距设置控制。
-                if (p.classList.contains('blank-line')) continue;
-                if (p.id && p.id.startsWith('chap-') && currentPageParas.length > 0) {
-                    createPage(currentPageParas);
-                    currentPageParas = [];
-                }
-                ruler.innerHTML = '';
-                currentPageParas.concat([p]).forEach(function(testP) { ruler.appendChild(testP.cloneNode(true)); });
-                if (ruler.scrollHeight > ruler.clientHeight) {
-                    createPage(currentPageParas);
-                    currentPageParas = [p];
-                } else {
-                    currentPageParas.push(p);
+            if (bookName && NR.storageDB && NR.storageDB.loadReaderLayout) {
+                try {
+                    var cached = await NR.storageDB.loadReaderLayout(bookName);
+                    if (sequence !== paginationSequence) return;
+                    if (cached && cached.contentKey === book.contentKey && cached.layoutKey === layoutKey && validPageRanges(cached.ranges, book)) {
+                        book.layoutKey = layoutKey;
+                        book.ranges = cached.ranges;
+                        installPageRanges(book, cached.ranges);
+                        return;
+                    }
+                } catch (error) {
+                    console.warn('读取分页缓存失败，将重新排版:', error);
                 }
             }
-            createPage(currentPageParas);
-            NR.state.totalPages = NR.state.allRenderedPages.length;
-            ruler.classList.remove('page');
-            ruler.innerHTML = ''; 
-            resolve();
-        });
+            if (sequence !== paginationSequence) return;
+            var ranges = [];
+            var start = -1;
+            var end = -1;
+            var used = padding;
+            var previousBottom = 0;
+            // One browser layout per batch, followed exclusively by reads.
+            // flow-root exposes each paragraph's collapsed image margins as
+            // well as its text height without rebuilding the candidate page.
+            for (var offset = 0; offset < book.visibleIndexes.length; offset += 256) {
+                var fragment = document.createDocumentFragment();
+                var measurements = [];
+                book.visibleIndexes.slice(offset, offset + 256).forEach(function(index) {
+                    var wrapper = document.createElement('div');
+                    wrapper.style.display = 'flow-root';
+                    var p = book.createParagraph(index);
+                    wrapper.appendChild(p);
+                    fragment.appendChild(wrapper);
+                    measurements.push({ index: index, wrapper: wrapper, paragraph: p });
+                });
+                ruler.appendChild(fragment);
+                measurements.forEach(function(item) {
+                    var box = item.wrapper.getBoundingClientRect();
+                    var rect = item.paragraph.getBoundingClientRect();
+                    var top = rect.top - box.top;
+                    var bottom = box.bottom - rect.bottom;
+                    var gap = Math.max(previousBottom, top);
+                    var candidate = start < 0 ? padding + top + rect.height + bottom : used - previousBottom + gap + rect.height + bottom;
+                    if (start >= 0 && (book.chapterIndexes.has(item.index) || Math.round(candidate) > height)) {
+                        ranges.push([start, end]);
+                        start = -1;
+                        candidate = padding + top + rect.height + bottom;
+                    }
+                    if (start < 0) start = item.index;
+                    end = item.index + 1;
+                    used = candidate;
+                    previousBottom = bottom;
+                });
+                ruler.innerHTML = '';
+                if (offset + 256 < book.visibleIndexes.length) {
+                    await new Promise(function(resolve) { setTimeout(resolve, 0); });
+                    if (sequence !== paginationSequence) return;
+                }
+            }
+            if (start >= 0) ranges.push([start, end]);
+            book.layoutKey = layoutKey;
+            book.ranges = ranges;
+            installPageRanges(book, ranges);
+            if (bookName && NR.storageDB && NR.storageDB.saveReaderLayout) {
+                // A cache failure must never prevent reading. Do not hold the
+                // loading screen open while IndexedDB commits an optimization.
+                NR.storageDB.saveReaderLayout({ id: bookName, contentKey: book.contentKey, layoutKey: layoutKey, ranges: ranges }).catch(function(error) {
+                    console.warn('保存分页缓存失败:', error);
+                });
+            }
+        } finally {
+            if (sequence === paginationSequence) {
+                ruler.classList.remove('page');
+                ruler.innerHTML = '';
+            }
+        }
     };
 
     NR.jumpToPage = function(page) {
@@ -225,16 +396,7 @@
             
             var repaginateAction = function() {
                 NR.paginate().then(function() {
-                    var targetPage = 1;
-                    if (startPIndex > 0) {
-                        for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
-                            var firstParaOnNewPage = NR.state.allRenderedPages[i].querySelector('p[data-original-index]');
-                            if (firstParaOnNewPage && parseInt(firstParaOnNewPage.dataset.originalIndex, 10) >= startPIndex) {
-                                targetPage = i + 1;
-                                break;
-                            }
-                        }
-                    }
+                    var targetPage = Math.max(1, NR.getPageForParagraph(startPIndex));
                     NR.state.currentPage = targetPage;
                     NR.updateDOMPages();
                     NR.updateUI();
@@ -246,16 +408,7 @@
             } else {
                 var options = { isRepagination: true };
                 NR.loadBook(NR.state.currentFileName, NR.state.currentFileContent, options).then(function() {
-                    var targetPage = 1;
-                    if (startPIndex > 0) {
-                        for (var i = 0; i < NR.state.allRenderedPages.length; i++) {
-                            var firstParaOnNewPage = NR.state.allRenderedPages[i].querySelector('p[data-original-index]');
-                            if (firstParaOnNewPage && parseInt(firstParaOnNewPage.dataset.originalIndex, 10) >= startPIndex) {
-                                targetPage = i + 1;
-                                break;
-                            }
-                        }
-                    }
+                    var targetPage = Math.max(1, NR.getPageForParagraph(startPIndex));
                     NR.jumpToPage(targetPage);
                 });
             }
@@ -341,25 +494,35 @@
             return NR.storageDB.loadBook(bookName).then(function(book) {
                 if (book) {
                     NR.state.activeSubView = 'original';
-                    NR.state.currentBookCoverUrl = null;
+                    NR.state.currentBookCoverUrl = bookMeta.cover || null;
                     NR.state.epubImagePreloadList = [];
                     NR.showReaderView();
                     
                     // 检查是否是 EPUB 文件（通过文件名或标记）
                     var isEpub = /\.epub$/i.test(bookName) || book.isEpub;
                     
-                    if (isEpub && book.content) {
+                    if (isEpub && book.content && typeof book.content !== 'string') {
                         // EPUB 文件需要解析
                         NR.els['app-loader'].querySelector('span').textContent = '正在解析 EPUB...';
                         
                         // content 可能是 Blob、ArrayBuffer 或其他格式
                         // JSZip.loadAsync 可以直接处理这些格式
-                        return NR.parseEpubToPlainText(book.content).then(function(result) {
+                        var parsed = book.epubTextVersion === 1 && book.parsedEpubText
+                            ? Promise.resolve({ textContent: book.parsedEpubText, coverUrl: book.epubCoverUrl })
+                            : NR.parseEpubToPlainText(book.content).then(function(result) {
+                                NR.storageDB.saveBook(Object.assign({}, book, {
+                                    epubTextVersion: 1, parsedEpubText: result.textContent, epubCoverUrl: result.coverUrl
+                                })).catch(function(error) { console.warn('保存 EPUB 解析缓存失败:', error); });
+                                return result;
+                            });
+                        return parsed.then(function(result) {
                             NR.state.currentBookCoverUrl = result.coverUrl;
+                            NR.state.epubImagePreloadList = getEpubImageUrls(result.textContent);
                             return NR.loadBook(book.id, result.textContent);
                         });
                     } else {
                         // TXT 文件直接加载
+                        if (isEpub) NR.state.epubImagePreloadList = getEpubImageUrls(book.content);
                         var restoreOnline = typeof NR.restoreOnlineReaderSession === 'function'
                             ? NR.restoreOnlineReaderSession(bookMeta, book.content)
                             : Promise.resolve(false);
@@ -379,6 +542,16 @@
         }
         return Promise.resolve();
     };
+
+    function getEpubImageUrls(content) {
+        var urls = [];
+        var pattern = /^:::EPUB_IMG:::([^|\r\n]+)/gm;
+        var match;
+        while ((match = pattern.exec(content || '')) !== null) {
+            urls.push(decodeURIComponent(match[1]));
+        }
+        return urls;
+    }
 
     NR.handleAddToShelf = function() {
         if (!NR.state.currentFileName || !NR.state.currentFileContent) return Promise.resolve();
