@@ -91,6 +91,14 @@ function chapterPayload(NR, prefix) {
     }));
 }
 
+function requestedReader(request) {
+    const prompt = request.body.messages[0].content;
+    const section = prompt.split('【本次读者人格提示词】\n')[1].split('\n\n---\n\n')[0];
+    assert.match(section, /^1\. /);
+    assert.doesNotMatch(section, /\n2\. /, 'a request must contain only one reader');
+    return section.slice(3).split('：')[0];
+}
+
 test('paragraph comment requests include all ten categories from distant earlier chapters', async () => {
     const { NR, elements, requests, generate } = loadComments();
     NR.saveChapterFormData(chapterPayload(NR, '第二章资料_'), '第2章');
@@ -204,40 +212,43 @@ test('the paragraph menu reads the selected paragraph once for touch plus synthe
 
 test('adding readers increases generated comments, including name-only readers', async () => {
     const { NR, elements, requests, generate } = loadComments({ respond: request => {
-        const prompt = request.body.messages[0].content;
-        return NR.state.aiSettings.readerPersonas.map(persona => ({ persona: persona.name, comment: persona.name + '看到了宝箱！' }));
+        const persona = requestedReader(request);
+        return [{ persona, comment: persona + '看到了宝箱！' }];
     } });
     await generate();
     assert.equal(NR.state.activeCommentThread.comments.length, 1);
     NR.state.aiSettings.readerPersonas.push({ name: '新读者', prompt: '' }, { name: '分析党', prompt: '分析伏笔' });
-    const prompt = await generate();
+    await generate();
 
-    assert.match(prompt, /当前共3位读者，必须恰好返回3条评论/);
-    assert.match(prompt, /新读者：以普通小说读者的身份/);
+    for (const request of requests) assert.match(request.body.messages[0].content, /当前共1位读者，必须恰好返回1条评论/);
+    const nameOnly = requests.find(request => requestedReader(request) === '新读者');
+    assert.match(nameOnly.body.messages[0].content, /新读者：以普通小说读者的身份/);
     assert.equal(elements['reader-comment-persona-count'].textContent, '3 位读者人格');
     assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.persona), ['剧情党', '新读者', '分析党']);
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 4);
     assert.equal(NR.state.currentBookData.comments.length, 1);
     assert.equal(elements['reader-comment-list'].children.length, 3);
 });
 
-test('missing readers are requested individually and duplicate or unknown replies do not increase the count', async () => {
-    const { NR, requests, generate } = loadComments({ respond: (request, number) => {
-        if (number === 1) return [
-            { persona: '剧情党', comment: '快开宝箱！' },
-            { persona: '剧情党', comment: '重复评论' },
+test('invalid replies retry only their reader and duplicate or unknown replies do not increase the count', async () => {
+    const attempts = new Map();
+    const { NR, requests, generate } = loadComments({ respond: request => {
+        const persona = requestedReader(request);
+        attempts.set(persona, (attempts.get(persona) || 0) + 1);
+        if (persona === '分析党' && attempts.get(persona) === 1) return [];
+        return [
+            { persona, comment: persona + '也在看宝箱！' },
+            { persona, comment: '重复评论' },
             { persona: '不存在的读者', comment: '未知评论' }
         ];
-        const prompt = request.body.messages[0].content;
-        const persona = prompt.includes('1. 分析党：') ? '分析党' : '吐槽党';
-        return { persona, comment: persona + '也在看宝箱！' };
     } });
     NR.state.aiSettings.readerPersonas.push({ name: '分析党', prompt: '分析' }, { name: '吐槽党', prompt: '吐槽' });
     await generate();
 
-    assert.equal(requests.length, 3);
+    assert.equal(requests.length, 4);
+    assert.deepEqual(Object.fromEntries(attempts), { '剧情党': 1, '分析党': 2, '吐槽党': 1 });
     assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.persona), ['剧情党', '分析党', '吐槽党']);
-    for (const request of requests.slice(1)) {
+    for (const request of requests) {
         const prompt = request.body.messages[0].content;
         assert.match(prompt, /当前共1位读者，必须恰好返回1条评论/);
         assert.match(prompt, /选中的木宝箱片段/);
@@ -245,15 +256,17 @@ test('missing readers are requested individually and duplicate or unknown replie
     }
 });
 
-test('complete responses are reordered to match configured readers, including duplicate names', async () => {
-    const { NR, requests, generate } = loadComments({ respond: () => [
-        { persona: '同名', comment: '同名读者甲' }, { persona: '剧情党', comment: '快开宝箱！' },
-        { persona: '同名', comment: '同名读者乙' }
-    ] });
+test('same-name readers receive separate requests with their own personality prompts', async () => {
+    const { NR, requests, generate } = loadComments({ respond: request => {
+        const prompt = request.body.messages[0].content;
+        if (requestedReader(request) === '剧情党') return [{ persona: '剧情党', comment: '快开宝箱！' }];
+        assert.notEqual(prompt.includes('乐观'), prompt.includes('谨慎'));
+        return [{ persona: '同名', comment: prompt.includes('乐观') ? '同名读者甲' : '同名读者乙' }];
+    } });
     NR.state.aiSettings.readerPersonas.push({ name: '同名', prompt: '乐观' }, { name: '同名', prompt: '谨慎' });
     await generate();
 
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 3);
     assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.text), ['快开宝箱！', '同名读者甲', '同名读者乙']);
 });
 
@@ -268,7 +281,7 @@ test('failed or truncated responses stop retrying and preserve previously saved 
         elements['btn-generate-reader-comments'].dispatch('click');
         await flush();
 
-        assert.equal(requests.length, 4, 'one initial request plus one bounded retry for each missing reader');
+        assert.equal(requests.length, 5, 'each of the two readers gets one request plus at most one retry');
         assert.equal(JSON.stringify(NR.state.currentBookData.comments), previous);
         assert.match(elements['reader-comment-list'].innerHTML, /未返回有效段评/);
         assert.equal(elements['btn-generate-reader-comments'].disabled, false);
@@ -287,18 +300,57 @@ test('an empty reader list does not send an API request or clear saved comments'
     assert.equal(NR.state.activeCommentThread.comments.length, 1);
 });
 
-test('a delayed generation cannot save comments into another book', async () => {
-    let release;
-    const { NR, elements, requests, open, flush } = loadComments({ respond: () => new Promise(resolve => { release = resolve; }) });
+test('single-reader requests keep at most two in flight and preserve configured order despite delayed responses', async () => {
+    const pending = new Map();
+    let active = 0;
+    let peak = 0;
+    const { NR, elements, requests, open, flush } = loadComments({ respond: request => new Promise(resolve => {
+        const name = requestedReader(request);
+        active++;
+        peak = Math.max(peak, active);
+        pending.set(name, () => { active--; resolve([{ persona: name, comment: name + '的独立评论' }]); });
+    }) });
+    const names = ['剧情党', '分析党', '吐槽党', '细节党', '氛围党'];
+    NR.state.aiSettings.readerPersonas = names.map((name, index) => ({ name, prompt: 'PERSONAL_STYLE_' + index }));
+    open();
+    elements['btn-generate-reader-comments'].dispatch('click');
+    await flush();
+    assert.equal(requests.length, 2);
+    assert.equal(NR.state.activeCommentThread.comments.length, 0, 'an incomplete set must not replace saved comments');
+    for (const name of ['分析党', '吐槽党', '细节党', '氛围党', '剧情党']) {
+        assert.ok(pending.has(name), name);
+        pending.get(name)();
+        await flush();
+    }
+    assert.equal(requests.length, names.length);
+    assert.equal(peak, 2);
+    assert.equal(elements['btn-generate-reader-comments'].disabled, false);
+    assert.deepEqual(Array.from(NR.state.activeCommentThread.comments, comment => comment.persona), names);
+    for (const request of requests) {
+        const readerIndex = names.indexOf(requestedReader(request));
+        const prompt = request.body.messages[0].content;
+        names.forEach((name, index) => assert.equal(prompt.includes('PERSONAL_STYLE_' + index), index === readerIndex));
+        assert.match(prompt, /选中的木宝箱片段/);
+        assert.doesNotMatch(prompt, /本章尚未读到的真相|后续章节正文/);
+    }
+});
+
+test('switching books stops queued readers and ignores responses already in flight', async () => {
+    const releases = [];
+    const { NR, elements, requests, open, flush } = loadComments({ respond: request => new Promise(resolve => {
+        releases.push(() => resolve([{ persona: requestedReader(request), comment: '旧书的评论' }]));
+    }) });
+    NR.state.aiSettings.readerPersonas.push({ name: '分析党', prompt: '分析' }, { name: '吐槽党', prompt: '吐槽' });
     open();
     elements['btn-generate-reader-comments'].dispatch('click');
     elements['btn-generate-reader-comments'].dispatch('click');
     await flush();
-    assert.equal(requests.length, 1, 'double clicking must not start another generation');
+    assert.equal(requests.length, 2, 'double clicking must not start another generation or exceed two requests');
     NR.state.currentFileName = 'another.txt';
     NR.state.currentBookData = { comments: [] };
-    release([{ persona: '剧情党', comment: '旧书的评论' }]);
+    releases.forEach(release => release());
     await flush();
     assert.equal(NR.state.currentBookData.comments.length, 0);
+    assert.equal(requests.length, 2, 'the third reader must not start after switching books');
     assert.equal(elements['btn-generate-reader-comments'].disabled, false);
 });

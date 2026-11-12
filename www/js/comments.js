@@ -305,26 +305,28 @@
         if (label) label.textContent = getReaderPersonas().length + ' 位读者人格';
     };
 
-    function buildPrompt(selectionInfo, personas) {
+    function buildCommentContext(selectionInfo) {
         var commentPrompt = NR.state.aiSettings.commentPrompt || NR.DEFAULT_AI_PROMPTS.COMMENT;
         var previousSummaries = getPreviousChapterSummaries(selectionInfo.chapterNumber);
         var summaryText = previousSummaries.length ? previousSummaries.map(function(item) {
             return '【' + (item.summary.range || ('第' + item.bounds.start + '章')) + '】\n' + (item.summary.text || '');
         }).join('\n\n') : '暂无选中片段前面章节的总结。';
 
-        var personaText = personas.map(function(persona, index) {
-            return (index + 1) + '. ' + persona.name + '：' + (persona.prompt || '以普通小说读者的身份，自然地评论选中片段。');
-        }).join('\n');
-
         return [
             '【评论AI提示词】\n' + commentPrompt,
-            '【不同读者人格提示词】\n' + personaText,
             '【选中小说片段】\n' + selectionInfo.text,
             '【选中片段前面所有章节总结（不含本章，按章节顺序）】\n' + summaryText,
             '【本章开头到选中片段为止的文本】\n' + selectionInfo.chapterTextBeforeSelection,
             '【此前章节AI数据库资料（不含本章）】\n' + buildPreviousChaptersAiData(selectionInfo.chapterNumber),
-            '【阅读范围约束】\n只能使用选中片段、本章开头至该片段的文本以及此前章节资料。前文数据库记录的是历史已知信息，当前场景和状态以本章已读文本为准；不得将本章未读部分或后续章节内容当作已知事实。',
-            '【最终输出要求】\n当前共' + personas.length + '位读者，必须恰好返回' + personas.length + '条评论，每位各1条。persona 字段严格使用上面对应的读者姓名，不得遗漏、重复或合并读者；同名读者也应分别生成。像番茄小说段评区一样自然。只输出JSON数组，数组项格式为{"persona":"读者姓名","comment":"评论内容"}，不要Markdown代码块，不要解释。'
+            '【阅读范围约束】\n只能使用选中片段、本章开头至该片段的文本以及此前章节资料。前文数据库记录的是历史已知信息，当前场景和状态以本章已读文本为准；不得将本章未读部分或后续章节内容当作已知事实。'
+        ].join('\n\n---\n\n');
+    }
+
+    function buildPrompt(context, persona) {
+        return [
+            context,
+            '【本次读者人格提示词】\n1. ' + persona.name + '：' + (persona.prompt || '以普通小说读者的身份，自然地评论选中片段。'),
+            '【最终输出要求】\n当前共1位读者，必须恰好返回1条评论。只扮演本次给出的读者人格，persona 字段必须为' + JSON.stringify(persona.name) + '。像番茄小说段评区一样自然。只输出JSON数组，数组项格式为{"persona":"读者姓名","comment":"评论内容"}，不要Markdown代码块，不要解释。'
         ].join('\n\n---\n\n');
     }
 
@@ -381,27 +383,30 @@
         });
     }
 
-    async function completeReaderComments(selectionInfo, personas, prompt, request, isCurrent) {
-        var generated = alignComments(parseCommentResponse(await request(prompt), personas), personas);
-        if (!isCurrent()) return null;
-        var missing = [];
-        generated.forEach(function(comment, index) { if (!comment) missing.push(index); });
+    async function completeReaderComments(personas, prompts, request, isCurrent) {
+        var generated = new Array(personas.length).fill(null);
         var cursor = 0;
         var errors = [];
-        async function fillMissing() {
-            while (cursor < missing.length && isCurrent()) {
-                var index = missing[cursor++];
+        async function generateNextReader() {
+            while (cursor < personas.length && isCurrent()) {
+                var index = cursor++;
                 var persona = personas[index];
-                try {
-                    var content = await request(buildPrompt(selectionInfo, [persona]));
-                    generated[index] = alignComments(parseCommentResponse(content, [persona]), [persona])[0];
-                } catch (error) {
-                    errors.push(error);
+                for (var attempt = 0; attempt < 2 && isCurrent(); attempt++) {
+                    try {
+                        var content = await request(prompts[index]);
+                        if (!isCurrent()) return;
+                        generated[index] = alignComments(parseCommentResponse(content, [persona]), [persona])[0];
+                        if (generated[index]) break;
+                    } catch (error) {
+                        errors.push(error);
+                        break;
+                    }
                 }
             }
         }
-        // Retry each omitted reader once, with at most two requests in flight.
-        await Promise.all(Array.from({ length: Math.min(2, missing.length) }, fillMissing));
+        // Each request contains one persona. Process at most two readers at a
+        // time and retry an empty or invalid response only once for that reader.
+        await Promise.all(Array.from({ length: Math.min(2, personas.length) }, generateNextReader));
         if (!isCurrent()) return null;
         var absent = personas.filter(function(persona, index) { return !generated[index]; });
         if (absent.length) {
@@ -546,7 +551,8 @@
             return;
         }
         NR.refreshReaderPersonaCount();
-        var prompt = buildPrompt(selectionInfo, personas);
+        var context = buildCommentContext(selectionInfo);
+        var prompts = personas.map(function(persona) { return buildPrompt(context, persona); });
         var bookName = NR.state.currentFileName;
         var bookData = NR.state.currentBookData;
         var apiUrl = getFullApiUrl();
@@ -584,13 +590,13 @@
         }
         return NR.handleAddToShelf().then(function() {
             if (!isCurrent()) return null;
-            return completeReaderComments(selectionInfo, personas, prompt, request, isCurrent);
+            return completeReaderComments(personas, prompts, request, isCurrent);
         }).then(function(generated) {
             if (!generated || !isCurrent()) return;
             thread.comments = generated;
             thread.selectedText = selectionInfo.text;
             thread.paragraphIndex = selectionInfo.paragraphIndex;
-            thread.promptPreview = prompt.substring(0, 2000);
+            thread.promptPreview = prompts[0].substring(0, 2000);
             saveThread(thread);
             renderComments(thread);
         }).catch(function(err) {
